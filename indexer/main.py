@@ -1,3 +1,8 @@
+from common.log import log
 
-def main():
-    pass
+logger = log.logger()
+
+def main(args):
+    logger.info("Starting indexer run")
+
+    logger.info("Successfully finished indexer run")
