@@ -1,11 +1,12 @@
 import glob
 
-# Corpus streaming
 from warcio.archiveiterator import ArchiveIterator
+import nltk
 
 from .parser import HtmlParser
 from common.log import log
 from common.metrics.tracker import log_memory_usage
+from common.utils.utils import suppress_output
 
 logger = log.logger()
 
@@ -20,6 +21,7 @@ class Indexer:
         self._docidx = 0
 
     def init(self):
+        nltk.download('punkt', quiet=True)
         self._corpus_files = glob.glob(self._corpus + "/*")
 
     def run(self):
@@ -46,7 +48,8 @@ class Indexer:
                     parser = HtmlParser(page)
                     relevant_text = parser.find_text()
                     new_docs[url] = relevant_text
-                    logger.debug("For URL '{url}', added text: {relevant_text")
+
+                    # logger.debug(f"For URL '{url}', added text: {relevant_text}")
 
         logger.info(f"Successfully streamized doc for path '{fpath}'")
         log_memory_usage(logger)
@@ -57,21 +60,21 @@ class Indexer:
         logger.info(f"Tokenizing docs")
         log_memory_usage(logger)
 
-        tokenized_docs = {}
+        tokenized_docs = docs
         for doc in docs:
-            pass
+            tokenized_docs[doc] = nltk.word_tokenize(docs[doc])
 
         logger.info(f"Successfully tokenized docs")
         log_memory_usage(logger)
 
         return tokenized_docs
 
-    def _preprocess(self, docs):
+    def _preprocess(self, tokenized_docs):
         logger.info(f"Preprocessing docs")
         log_memory_usage(logger)
 
         preprocessed_docs = {}
-        for doc in docs:
+        for doc in tokenized_docs:
             pass
 
         logger.info(f"Successfully preprocessed docs")
