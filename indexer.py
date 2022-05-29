@@ -59,5 +59,5 @@ if __name__ == "__main__":
     except MemoryError:
         sys.stderr.write('\n\nERROR: Memory Exception\n')
         sys.exit(1)
-    except Exception:
+    except Exception as e:
         logger.critical(f"Encountered fatal error: {e}", exc_info=True)
