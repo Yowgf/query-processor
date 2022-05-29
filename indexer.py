@@ -3,6 +3,7 @@ import resource
 import argparse
 
 from common.log import log
+from common.metrics.tracker import Tracker
 from indexer.main import main as indexer_main
 
 logger = log.logger()
@@ -52,6 +53,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     memory_limit(args.memory_limit)
     try:
+        process_tracker = Tracker()
+        process_tracker.track()
+
         if args.log_level != None:
             log.set_level(args.log_level)
 
