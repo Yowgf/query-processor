@@ -22,6 +22,10 @@ class Indexer:
 
     def init(self):
         nltk.download('punkt', quiet=True)
+        nltk.download('stopwords', quiet=True)
+        self._stemmer = nltk.stem.snowball.PortugueseStemmer()
+        self._stopwords = set(nltk.corpus.stopwords.words('portuguese'))
+
         self._corpus_files = glob.glob(self._corpus + "/*")
 
     def run(self):
@@ -73,9 +77,17 @@ class Indexer:
         logger.info(f"Preprocessing docs")
         log_memory_usage(logger)
 
-        preprocessed_docs = {}
+        preprocessed_docs = tokenized_docs
         for doc in tokenized_docs:
-            pass
+            doc_words = tokenized_docs[doc]
+
+            processed_words = []
+            for word in doc_words:
+                if word in self._stopwords:
+                    continue
+                processed_word = self._stemmer.stem(word)
+                processed_words.append(processed_word)
+            preprocessed_docs[doc] = processed_words
 
         logger.info(f"Successfully preprocessed docs")
         log_memory_usage(logger)
