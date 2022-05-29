@@ -1,8 +1,10 @@
 import tracemalloc
 
 class Tracker:
+    tracking = False
+
     def __init__(self):
-        pass
+        Tracker.tracking = True
 
     def __del__(self):
         tracemalloc.stop()
@@ -11,6 +13,9 @@ class Tracker:
         tracemalloc.start()
 
 def log_memory_usage(logger):
+    if not Tracker.tracking:
+        return
+
     current_bytes, peak_bytes = tracemalloc.get_traced_memory()
     MB = 1024 * 1024
     current_mb = current_bytes / MB

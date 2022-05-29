@@ -50,11 +50,21 @@ if __name__ == "__main__":
         type=str,
         help="logging level"
     )
+    parser.add_argument(
+        '-track-memory',
+        dest='track_memory',
+        action='store',
+        required=False,
+        type=bool,
+        help=("Whether should track memory usage. Enabling this option "+
+              "significantly affects program performance.")
+    )
     args = parser.parse_args()
     memory_limit(args.memory_limit)
     try:
-        process_tracker = Tracker()
-        process_tracker.track()
+        if args.track_memory:
+            process_tracker = Tracker()
+            process_tracker.track()
 
         if args.log_level != None:
             log.set_level(args.log_level)

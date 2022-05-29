@@ -17,7 +17,7 @@ class Indexer:
         self._output_file = config.output_file
 
         self._corpus_files = None
-        self._index = []
+        self._index = {}
         self._docidx = 0
 
     def init(self):
@@ -69,6 +69,7 @@ class Indexer:
             tokenized_docs[doc] = nltk.word_tokenize(docs[doc])
 
         logger.info(f"Successfully tokenized docs")
+        logger.debug(f"Tokenized docs result: {tokenized_docs}")
         log_memory_usage(logger)
 
         return tokenized_docs
@@ -81,24 +82,46 @@ class Indexer:
         for doc in tokenized_docs:
             doc_words = tokenized_docs[doc]
 
-            processed_words = []
+            # map word -> freq
+            processed_word_freq = {}
             for word in doc_words:
+                # Stopword removal
                 if word in self._stopwords:
                     continue
-                processed_word = self._stemmer.stem(word)
-                processed_words.append(processed_word)
-            preprocessed_docs[doc] = processed_words
+
+                # Normalization
+                normalized_word = self._stemmer.stem(word)
+
+                # Increment frequency
+                if normalized_word not in processed_word_freq:
+                    processed_word_freq[normalized_word] = 0
+                processed_word_freq[normalized_word] += 1
+
+            preprocessed_docs[doc] = processed_word_freq
 
         logger.info(f"Successfully preprocessed docs")
+        logger.debug(f"Preprocessed docs result: {preprocessed_docs}")
         log_memory_usage(logger)
 
         return preprocessed_docs
 
-    def _produce_index(self, docs):
+    def _produce_index(self, preprocessed_docs):
         logger.info(f"Indexing docs")
         log_memory_usage(logger)
 
-        # TODO: output index to self._output_file
+        # TODO: flush index to self._output_file if too big.
+        # with open(self._output_file, 'a') as stream:
+        #     pass
+
+        for doc in preprocessed_docs:
+            word_freq = preprocessed_docs[doc]
+            for word in word_freq:
+                freq = word_freq[word]
+                if word not in self._index:
+                    self._index[word] = []
+                self._index[word].append((self._docidx, freq))
+            self._docidx += 1
 
         logger.info(f"Successfully indexed docs")
+        logger.debug(f"Index result: {self._index}")
         log_memory_usage(logger)
