@@ -9,6 +9,8 @@ from .parser import HtmlParser
 from .utils import read_index
 from .utils import write_index
 from .utils import merge_indexes
+from .utils import is_useful_warcio_record
+from .utils import get_warcio_record_url
 from common.log import log
 from common.metrics.tracker import log_memory_usage
 from common.utils.utils import suppress_output
@@ -20,6 +22,8 @@ logger = log.logger()
 # TODO: parallelize
 
 class Indexer:
+    _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '»'])
+
     def __init__(self, config):
         self._corpus = config.corpus
         self._memory_limit = config.memory_limit
@@ -30,11 +34,18 @@ class Indexer:
         self._docidx = 0
         self._subindexes_dir = "subindexes"
 
+        # Dict filepath -> URL where we left off
+        self._file_checkpoint = {}
+
+        # TODO: adjust according to memory limit
+        self._max_docs_per_file = 100
+
     def init(self):
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
         self._stemmers = [nltk.stem.snowball.PortugueseStemmer(),
-                          nltk.stem.snowball.EnglishStemmer()]
+                          #nltk.stem.snowball.EnglishStemmer(),
+        ]
         self._stopwords = set(nltk.corpus.stopwords.words('portuguese') +
                               nltk.corpus.stopwords.words('english'))
 
@@ -44,12 +55,15 @@ class Indexer:
         truncate_dir(self._subindexes_dir)
 
     def run(self):
-        for fpath in self._corpus_files:
-            docs = self._streamize(fpath)
-            tokenized_docs = self._tokenize(docs)
-            preprocessed_docs = self._preprocess(tokenized_docs)
-            self._produce_index(preprocessed_docs)
-            self._flush_index()
+        doc_fpaths = self._corpus_files
+        while len(doc_fpaths) > 0:
+            for fpath in doc_fpaths:
+                docs = self._streamize(fpath)
+                tokenized_docs = self._tokenize(docs)
+                preprocessed_docs = self._preprocess(tokenized_docs)
+                self._produce_index(preprocessed_docs)
+                self._flush_index()
+            doc_fpaths = list(self._file_checkpoint.keys())
         self._merge_index()
         self._cleanup
 
@@ -62,19 +76,35 @@ class Indexer:
 
         new_docs = {}
 
-        # TODO: find out file size before actually putting into memory
+        parsed_whole_file = True
         with open(fpath, 'rb') as stream:
             for record in ArchiveIterator(stream):
-                if (record.rec_type == 'response' and
-                      record.http_headers.get_header('Content-Type') == 'text/html'
-                ):
-                    url = record.rec_headers.get_header('WARC-Target-URI')
+                # Get back to last checkpoint in the WARCIO file
+                if fpath in self._file_checkpoint:
+                    if is_useful_warcio_record(record):
+                        url = get_warcio_record_url(record)
+                        if url != self._file_checkpoint[fpath]:
+                            continue
+
+                if is_useful_warcio_record(record):
+                    url = get_warcio_record_url(record)
                     page = record.content_stream().read()
+
+                    # TODO: this parsing is taking a lot of time. Is there a way
+                    # to avoid this?
                     parser = HtmlParser(page)
                     relevant_text = parser.find_text()
                     new_docs[url] = relevant_text
-
                     # logger.debug(f"For URL '{url}', added text: {relevant_text}")
+
+                    if len(new_docs) >= self._max_docs_per_file:
+                        self._file_checkpoint[fpath] = url
+                        parsed_whole_file = False
+                        break
+
+        if parsed_whole_file:
+            if fpath in self._file_checkpoint:
+                self._file_checkpoint.pop(fpath)
 
         logger.info(f"Successfully streamized doc for path '{fpath}'")
         log_memory_usage(logger)
@@ -110,10 +140,18 @@ class Indexer:
                 if word in self._stopwords:
                     continue
 
+                # Malformed words removal.
+                # Examples: '', ',123', '.hello', '(me'.
+                if word == '' or word[0] in self._punctuations:
+                    continue
+
                 # Normalization
                 normalized_word = word
                 for stemmer in self._stemmers:
                     normalized_word = stemmer.stem(normalized_word)
+                # Max 20 chars
+                if len(normalized_word) > 20:
+                    normalized_word = normalized_word[:20]
 
                 # Increment frequency
                 if normalized_word not in processed_word_freq:

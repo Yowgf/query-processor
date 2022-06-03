@@ -11,8 +11,7 @@ def read_index(infpath):
         index[word] = []
         for docfreq_str in split_by_space[1:]:
             docfreq_split = docfreq_str.split(",")
-            assert len(docfreq_split) == 2 # TODO: remove after some testing
-            docfreq = tuple(docfreq_split)
+            docfreq = (int(docfreq_split[0]), int(docfreq_split[1]))
             index[word].append(docfreq)
     return index
 
@@ -31,3 +30,11 @@ def merge_indexes(index1, index2):
         if word in index2:
             merged_index[word] = sorted(index1[word] + index2[word])
     return merged_index
+
+def is_useful_warcio_record(record):
+    return (record.rec_type == 'response' and
+            record.http_headers != None and
+            record.http_headers.get_header('Content-Type') == 'text/html')
+
+def get_warcio_record_url(record):
+    return record.rec_headers.get_header('WARC-Target-URI')
