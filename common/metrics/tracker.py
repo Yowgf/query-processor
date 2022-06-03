@@ -21,4 +21,4 @@ def log_memory_usage(logger):
     current_mb = current_bytes / MB
     peak_mb = peak_bytes / MB
     logger.info(f"Current memory usage: {current_mb:.2f}MB. "+
-                f"Peak memory usage: {peak_mb:.2f}MB")
+                f"Peak memory usage: {peak_mb:.2f}MB.")

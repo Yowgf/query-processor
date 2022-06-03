@@ -1,4 +1,6 @@
 import glob
+import os
+from shutil import rmtree
 
 from warcio.archiveiterator import ArchiveIterator
 import nltk
@@ -10,6 +12,8 @@ from common.utils.utils import suppress_output
 
 logger = log.logger()
 
+# TODO: parallelize
+
 class Indexer:
     def __init__(self, config):
         self._corpus = config.corpus
@@ -19,6 +23,7 @@ class Indexer:
         self._corpus_files = None
         self._index = {}
         self._docidx = 0
+        self._subindexes_dir = "subindexes"
 
     def init(self):
         nltk.download('punkt', quiet=True)
@@ -28,12 +33,21 @@ class Indexer:
 
         self._corpus_files = glob.glob(self._corpus + "/*")
 
+        # Create if not exists
+        try:
+            os.stat(self._subindexes_dir)
+            rmtree(self._subindexes_dir)
+        except FileNotFoundError:
+            pass
+        os.mkdir(self._subindexes_dir)
+
     def run(self):
         for fpath in self._corpus_files:
             docs = self._streamize(fpath)
             tokenized_docs = self._tokenize(docs)
             preprocessed_docs = self._preprocess(tokenized_docs)
             self._produce_index(preprocessed_docs)
+            self._flush_index()
 
     def _streamize(self, fpath):
         logger.info(f"Streamizing doc for path '{fpath}'")
@@ -109,10 +123,6 @@ class Indexer:
         logger.info(f"Indexing docs")
         log_memory_usage(logger)
 
-        # TODO: flush index to self._output_file if too big.
-        # with open(self._output_file, 'a') as stream:
-        #     pass
-
         for doc in preprocessed_docs:
             word_freq = preprocessed_docs[doc]
             for word in word_freq:
@@ -124,4 +134,21 @@ class Indexer:
 
         logger.info(f"Successfully indexed docs")
         logger.debug(f"Index result: {self._index}")
+        log_memory_usage(logger)
+
+    def _flush_index(self):
+        outfpath = f"{self._subindexes_dir}/{self._docidx}_{self._output_file}"
+        logger.info(f"Flushing index to path '{outfpath}'")
+        log_memory_usage(logger)
+
+        with open(outfpath, 'a') as outf:
+            for word in self._index:
+                outf.write(word)
+                inverted_list = self._index[word]
+                for entry in inverted_list:
+                    outf.write(f" {entry[0]},{entry[1]}")
+                outf.write("\n")
+        self._index = {}
+
+        logger.info(f"Successfully flushed index to path '{outfpath}'")
         log_memory_usage(logger)
