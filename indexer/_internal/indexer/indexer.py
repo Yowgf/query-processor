@@ -22,7 +22,7 @@ logger = log.logger()
 # TODO: parallelize
 
 class Indexer:
-    _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '»'])
+    _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '/', '\\']) # '»',
 
     def __init__(self, config):
         self._corpus = config.corpus
@@ -38,7 +38,7 @@ class Indexer:
         self._file_checkpoint = {}
 
         # TODO: adjust according to memory limit
-        self._max_docs_per_file = 100
+        self._max_docs_per_file = 2000
 
     def init(self):
         nltk.download('punkt', quiet=True)
@@ -77,14 +77,21 @@ class Indexer:
         new_docs = {}
 
         parsed_whole_file = True
+        found_checkpoint = False
         with open(fpath, 'rb') as stream:
             for record in ArchiveIterator(stream):
                 # Get back to last checkpoint in the WARCIO file
-                if fpath in self._file_checkpoint:
-                    if is_useful_warcio_record(record):
-                        url = get_warcio_record_url(record)
-                        if url != self._file_checkpoint[fpath]:
-                            continue
+                if not found_checkpoint:
+                    if fpath in self._file_checkpoint:
+                        if is_useful_warcio_record(record):
+                            url = get_warcio_record_url(record)
+                            if url == self._file_checkpoint[fpath]:
+                                found_checkpoint = True
+                                continue
+                            else:
+                                continue
+                    else:
+                        found_checkpoint = True
 
                 if is_useful_warcio_record(record):
                     url = get_warcio_record_url(record)
@@ -103,6 +110,7 @@ class Indexer:
                         break
 
         if parsed_whole_file:
+            logger.info(f"Finished parsing file '{fpath}'")
             if fpath in self._file_checkpoint:
                 self._file_checkpoint.pop(fpath)
 
@@ -212,6 +220,11 @@ class Indexer:
             index2_fpath = subindex_fpaths.pop()
             index1 = read_index(index1_fpath)
             index2 = read_index(index2_fpath)
+
+            assert len(index1) != 0
+            assert len(index2) != 0
+
+            # TODO: maybe not such a good idea to remove these files here
             os.remove(index1_fpath)
             os.remove(index2_fpath)
 

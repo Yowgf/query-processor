@@ -29,6 +29,8 @@ def merge_indexes(index1, index2):
     for word in index1:
         if word in index2:
             merged_index[word] = sorted(index1[word] + index2[word])
+        else:
+            merged_index[word] = index1[word]
     return merged_index
 
 def is_useful_warcio_record(record):
