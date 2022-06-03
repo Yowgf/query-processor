@@ -1,14 +1,19 @@
 import glob
+import shutil
 import os
-from shutil import rmtree
 
 from warcio.archiveiterator import ArchiveIterator
 import nltk
 
 from .parser import HtmlParser
+from .utils import read_index
+from .utils import write_index
+from .utils import merge_indexes
 from common.log import log
 from common.metrics.tracker import log_memory_usage
 from common.utils.utils import suppress_output
+from common.utils.utils import truncate_file
+from common.utils.utils import truncate_dir
 
 logger = log.logger()
 
@@ -28,18 +33,15 @@ class Indexer:
     def init(self):
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
-        self._stemmer = nltk.stem.snowball.PortugueseStemmer()
-        self._stopwords = set(nltk.corpus.stopwords.words('portuguese'))
+        self._stemmers = [nltk.stem.snowball.PortugueseStemmer(),
+                          nltk.stem.snowball.EnglishStemmer()]
+        self._stopwords = set(nltk.corpus.stopwords.words('portuguese') +
+                              nltk.corpus.stopwords.words('english'))
 
         self._corpus_files = glob.glob(self._corpus + "/*")
 
-        # Create if not exists
-        try:
-            os.stat(self._subindexes_dir)
-            rmtree(self._subindexes_dir)
-        except FileNotFoundError:
-            pass
-        os.mkdir(self._subindexes_dir)
+        truncate_file(self._output_file)
+        truncate_dir(self._subindexes_dir)
 
     def run(self):
         for fpath in self._corpus_files:
@@ -48,6 +50,11 @@ class Indexer:
             preprocessed_docs = self._preprocess(tokenized_docs)
             self._produce_index(preprocessed_docs)
             self._flush_index()
+        self._merge_index()
+        self._cleanup
+
+    def _cleanup(self):
+        os.rmdir(self._subindexes_dir)
 
     def _streamize(self, fpath):
         logger.info(f"Streamizing doc for path '{fpath}'")
@@ -104,7 +111,9 @@ class Indexer:
                     continue
 
                 # Normalization
-                normalized_word = self._stemmer.stem(word)
+                normalized_word = word
+                for stemmer in self._stemmers:
+                    normalized_word = stemmer.stem(normalized_word)
 
                 # Increment frequency
                 if normalized_word not in processed_word_freq:
@@ -138,17 +147,43 @@ class Indexer:
 
     def _flush_index(self):
         outfpath = f"{self._subindexes_dir}/{self._docidx}_{self._output_file}"
+
         logger.info(f"Flushing index to path '{outfpath}'")
         log_memory_usage(logger)
 
-        with open(outfpath, 'a') as outf:
-            for word in self._index:
-                outf.write(word)
-                inverted_list = self._index[word]
-                for entry in inverted_list:
-                    outf.write(f" {entry[0]},{entry[1]}")
-                outf.write("\n")
+        write_index(self._index, outfpath)
         self._index = {}
 
         logger.info(f"Successfully flushed index to path '{outfpath}'")
+        log_memory_usage(logger)
+
+    def _merge_index(self):
+        logger.info(f"Merging index from dir '{self._subindexes_dir}' to file "+
+                    f"'{self._output_file}'")
+        log_memory_usage(logger)
+
+        subindex_fpaths = glob.glob(f"{self._subindexes_dir}/*")
+        if len(subindex_fpaths) == 0:
+            return
+        if len(subindex_fpaths) == 1:
+            shutil.move(subindex_fpaths.pop(), self._output_file)
+            return
+
+        while len(subindex_fpaths) > 1:
+            index1_fpath = subindex_fpaths.pop()
+            index2_fpath = subindex_fpaths.pop()
+            index1 = read_index(index1_fpath)
+            index2 = read_index(index2_fpath)
+            os.remove(index1_fpath)
+            os.remove(index2_fpath)
+
+            merged_index = merge_indexes(index1, index2)
+            merged_index_outfpath = index1_fpath
+            write_index(merged_index, merged_index_outfpath)
+
+            subindex_fpaths = glob.glob(f"{self._subindexes_dir}/*")
+        shutil.move(subindex_fpaths.pop(), self._output_file)
+
+        logger.info(f"Successfully merged index from dir '{self._subindexes_dir}'"+
+                    f" to file '{self._output_file}'")
         log_memory_usage(logger)

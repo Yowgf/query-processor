@@ -7,5 +7,6 @@ venv
 *#
 
 # Project-specific
-corpus
+corpus*
 subindexes
+index.out
