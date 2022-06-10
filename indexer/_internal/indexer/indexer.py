@@ -13,7 +13,6 @@ from .utils import is_useful_warcio_record
 from .utils import get_warcio_record_url
 from common.log import log
 from common.metrics.tracker import log_memory_usage
-from common.utils.utils import suppress_output
 from common.utils.utils import truncate_file
 from common.utils.utils import truncate_dir
 
@@ -21,9 +20,20 @@ logger = log.logger()
 
 # TODOs:
 #
-# - parallelize with pipeline
+# - Add typing information to this class
 #
-# - parallelize with processes
+# - parallelize with threads
+#
+# - make sure subindexes are being generated with right memory utilization by
+#   letting the program run for a while.
+#
+# - write merging algorithm
+#
+# - test merging algorithm by letting it run for a while, and then over
+#   night. If it is successful, we should have our final index at hands!
+#
+# - if possible and necessary, parallelize with pipeline
+#
 ################################################################################
 
 class Indexer:
