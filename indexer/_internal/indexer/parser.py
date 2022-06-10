@@ -1,3 +1,5 @@
+from typing import ByteString
+
 from bs4 import BeautifulSoup
 from bs4.element import Comment as bs4_comment
 
@@ -33,3 +35,13 @@ class HtmlParser:
                 relevant_words.extend(element_str.split(" "))
 
         return " ".join(relevant_words)
+
+class PlaintextParser:
+    def normalize_text(text: ByteString):
+        text = text.decode('utf-8')
+        text = text.replace("\t", " ")
+        text = text.replace("\r", " ")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text

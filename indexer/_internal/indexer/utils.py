@@ -1,3 +1,7 @@
+from common.log import log
+
+logger = log.logger()
+
 def read_index(infpath):
     index = {}
     index_str = open(infpath, 'r').read()
@@ -36,7 +40,8 @@ def merge_indexes(index1, index2):
 def is_useful_warcio_record(record):
     return (record.rec_type == 'response' and
             record.http_headers != None and
-            record.http_headers.get_header('Content-Type') == 'text/html')
+            record.http_headers.get_header('Content-Type') == 'text/html' or
+            record.http_headers.get_header('Content-Type') == 'application/http')
 
 def get_warcio_record_url(record):
     return record.rec_headers.get_header('WARC-Target-URI')

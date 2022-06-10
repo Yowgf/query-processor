@@ -5,7 +5,7 @@ import os
 from warcio.archiveiterator import ArchiveIterator
 import nltk
 
-from .parser import HtmlParser
+from .parser import PlaintextParser
 from .utils import read_index
 from .utils import write_index
 from .utils import merge_indexes
@@ -19,7 +19,12 @@ from common.utils.utils import truncate_dir
 
 logger = log.logger()
 
-# TODO: parallelize
+# TODOs:
+#
+# - parallelize with pipeline
+#
+# - parallelize with processes
+################################################################################
 
 class Indexer:
     _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '/', '\\']) # '»',
@@ -77,37 +82,22 @@ class Indexer:
         new_docs = {}
 
         parsed_whole_file = True
-        found_checkpoint = False
         with open(fpath, 'rb') as stream:
+            if fpath in self._file_checkpoint:
+                stream.seek(self._file_checkpoint[fpath])
+
             for record in ArchiveIterator(stream):
-                # Get back to last checkpoint in the WARCIO file
-                if not found_checkpoint:
-                    if fpath in self._file_checkpoint:
-                        if is_useful_warcio_record(record):
-                            url = get_warcio_record_url(record)
-                            if url == self._file_checkpoint[fpath]:
-                                found_checkpoint = True
-                                continue
-                            else:
-                                continue
-                    else:
-                        found_checkpoint = True
-
-                if is_useful_warcio_record(record):
-                    url = get_warcio_record_url(record)
-                    page = record.content_stream().read()
-
-                    # TODO: this parsing is taking a lot of time. Is there a way
-                    # to avoid this?
-                    parser = HtmlParser(page)
-                    relevant_text = parser.find_text()
-                    new_docs[url] = relevant_text
-                    # logger.debug(f"For URL '{url}', added text: {relevant_text}")
-
-                    if len(new_docs) >= self._max_docs_per_file:
-                        self._file_checkpoint[fpath] = url
-                        parsed_whole_file = False
-                        break
+                url = get_warcio_record_url(record)
+                text = record.content_stream().read()
+                normalized_text = PlaintextParser.normalize_text(text)
+                new_docs[url] = normalized_text
+                # logger.debug(f"Added URL '{url}'")
+                # logger.debug(f"For URL '{url}', added text: {normalized_text}")
+                
+                if len(new_docs) >= self._max_docs_per_file:
+                    self._file_checkpoint[fpath] = stream.tell()
+                    parsed_whole_file = False
+                    break
 
         if parsed_whole_file:
             logger.info(f"Finished parsing file '{fpath}'")
