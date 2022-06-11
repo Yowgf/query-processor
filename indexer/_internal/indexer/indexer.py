@@ -1,11 +1,13 @@
 import glob
-import shutil
 import os
+import shutil
+from typing import Mapping, List, Tuple
 
 from warcio.archiveiterator import ArchiveIterator
 import nltk
 
 from .parser import PlaintextParser
+from .subindex import Subindex
 from .utils import read_index
 from .utils import write_index
 from .utils import merge_indexes
@@ -39,23 +41,33 @@ logger = log.logger()
 class Indexer:
     _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '/', '\\']) # '»',
 
+    _estimate_max_memory_consumed_per_doc = 0.4 # MB
+
     def __init__(self, config):
         self._corpus = config.corpus
         self._memory_limit = config.memory_limit
         self._output_file = config.output_file
 
         self._corpus_files = None
-        self._index = {}
+        self._index: Mapping[str, List[Tuple[int, int]]] = {}
         self._docidx = 0
         self._subindexes_dir = "subindexes"
 
         # Dict filepath -> URL where we left off
         self._file_checkpoint = {}
 
-        # TODO: adjust according to memory limit
-        self._max_docs_per_file = 2000
-
+    # init is separated from __init__ because it might throw exceptions.
     def init(self):
+        # The order in which the sub-init functions are called is very
+        # important.
+        logger.info("Initializing indexer.")
+        self._init_nltk()
+        self._init_files()
+        self._init_limits()
+        self._init_subindexes()
+        logger.info("Successfully initialized indexer.")
+
+    def _init_nltk(self):
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
         self._stemmers = [nltk.stem.snowball.PortugueseStemmer(),
@@ -64,10 +76,42 @@ class Indexer:
         self._stopwords = set(nltk.corpus.stopwords.words('portuguese') +
                               nltk.corpus.stopwords.words('english'))
 
+    def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
-
         truncate_file(self._output_file)
         truncate_dir(self._subindexes_dir)
+
+    # _init_limits assumes that the corpus files have already been located.
+    def _init_limits(self):
+        safe_memory_margin = 0.7
+        safe_memory_limit = self._memory_limit * safe_memory_margin
+
+        self._absolute_limit_num_threads = int(min(50, len(self._corpus_files) / 2))
+        self._max_num_threads = int(safe_memory_limit /
+                                    self._absolute_limit_num_threads)
+        self._max_docs_per_file = int(safe_memory_limit / self._max_num_threads //
+                                   self._estimate_max_memory_consumed_per_doc)
+        self._num_subindexes = min(2 * self._max_num_threads,
+                                   len(self._corpus_files))
+
+        logger.info(f"Limit absolute_limit_num_threads="+
+                    f"{self._absolute_limit_num_threads}")
+        logger.info(f"Limit max_num_threads={self._max_num_threads}")
+        logger.info(f"Limit max_docs_per_file={self._max_docs_per_file}")
+
+    # _init_subindexes assumes that the corpus files have already been located.
+    def _init_subindexes(self):
+        self._subindexes = [Subindex(id) for id in range(self._num_subindexes)]
+        subindex_id = 0
+        file_idx = 0
+        fpaths = self._corpus_files
+        num_files = len(fpaths)
+        while file_idx < num_files:
+            for subindex_idx in range(self._num_subindexes):
+                self._subindexes[subindex_idx].push_file(fpaths[file_idx])
+                file_idx += 1
+                if file_idx >= num_files:
+                    break
 
     def run(self):
         doc_fpaths = self._corpus_files
@@ -85,7 +129,7 @@ class Indexer:
     def _cleanup(self):
         os.rmdir(self._subindexes_dir)
 
-    def _streamize(self, fpath):
+    def _streamize(self, fpath: str):
         logger.info(f"Streamizing doc for path '{fpath}'")
         log_memory_usage(logger)
 
@@ -103,11 +147,13 @@ class Indexer:
                 new_docs[url] = normalized_text
                 # logger.debug(f"Added URL '{url}'")
                 # logger.debug(f"For URL '{url}', added text: {normalized_text}")
-                
+
                 if len(new_docs) >= self._max_docs_per_file:
-                    self._file_checkpoint[fpath] = stream.tell()
                     parsed_whole_file = False
                     break
+
+            if not parsed_whole_file:
+                self._file_checkpoint[fpath] = stream.tell()
 
         if parsed_whole_file:
             logger.info(f"Finished parsing file '{fpath}'")
@@ -119,7 +165,7 @@ class Indexer:
 
         return new_docs
 
-    def _tokenize(self, docs):
+    def _tokenize(self, docs: Mapping[str, str]) -> Mapping[str, List[str]]:
         logger.info(f"Tokenizing docs")
         log_memory_usage(logger)
 
@@ -133,7 +179,7 @@ class Indexer:
 
         return tokenized_docs
 
-    def _preprocess(self, tokenized_docs):
+    def _preprocess(self, tokenized_docs: Mapping[str, List[str]]) -> Mapping[str, Mapping[str, int]]:
         logger.info(f"Preprocessing docs")
         log_memory_usage(logger)
 
@@ -174,7 +220,7 @@ class Indexer:
 
         return preprocessed_docs
 
-    def _produce_index(self, preprocessed_docs):
+    def _produce_index(self, preprocessed_docs: Mapping[str, Mapping[str, int]]):
         logger.info(f"Indexing docs")
         log_memory_usage(logger)
 
