@@ -1,6 +1,8 @@
+import concurrent.futures
 import glob
 import os
 import shutil
+from threading import get_ident
 from typing import Mapping, List, Tuple
 
 from warcio.archiveiterator import ArchiveIterator
@@ -21,8 +23,6 @@ from common.utils.utils import truncate_dir
 logger = log.logger()
 
 # TODOs:
-#
-# - Add typing information to this class
 #
 # - parallelize with threads
 #
@@ -50,7 +50,6 @@ class Indexer:
 
         self._corpus_files = None
         self._index: Mapping[str, List[Tuple[int, int]]] = {}
-        self._docidx = 0
         self._subindexes_dir = "subindexes"
 
         # Dict filepath -> URL where we left off
@@ -83,7 +82,7 @@ class Indexer:
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
-        safe_memory_margin = 0.7
+        safe_memory_margin = 0.5
         safe_memory_limit = self._memory_limit * safe_memory_margin
 
         self._absolute_limit_num_threads = int(min(50, len(self._corpus_files) / 2))
@@ -114,33 +113,92 @@ class Indexer:
                     break
 
     def run(self):
-        doc_fpaths = self._corpus_files
-        while len(doc_fpaths) > 0:
-            for fpath in doc_fpaths:
-                docs = self._streamize(fpath)
-                tokenized_docs = self._tokenize(docs)
-                preprocessed_docs = self._preprocess(tokenized_docs)
-                self._produce_index(preprocessed_docs)
-                self._flush_index()
-            doc_fpaths = list(self._file_checkpoint.keys())
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_num_threads
+        ) as executor:
+            results = []
+
+            subindexes = self._subindexes
+
+            while True:
+                self._submit_jobs(executor, results, self._subindexes)
+                subindexes = []
+
+                completed, not_completed = concurrent.futures.wait(
+                    results,
+                    timeout=5,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                results = list(not_completed)
+                if len(results) == 0:
+                    logger.info("Stopping indexer: no jobs left.")
+                    break
+
+                for future in completed:
+                    subindex = self._process_complete_job(future)
+                    if subindex != None:
+                        subindexes.append(subindex)
+
         self._merge_index()
         self._cleanup
+
+    def _submit_jobs(self, executor, results, subindexes):
+        for subindex in subindexes:
+            results.append(executor.submit(self._run, subindex))
+
+    def _process_complete_job(self, future):
+        subindex, completed_subindex = future.result()
+
+        if completed_subindex:
+            return subindex
+        else:
+            return None
 
     def _cleanup(self):
         os.rmdir(self._subindexes_dir)
 
-    def _streamize(self, fpath: str):
-        logger.info(f"Streamizing doc for path '{fpath}'")
+    def _run(self, subindex):
+        tid = get_ident()
+
+        try:
+            fpath, checkpoint = subindex.pop_file()
+
+            docs, completed, checkpoint = self._streamize(fpath, checkpoint, tid)
+            tokenized_docs = self._tokenize(docs, tid)
+            preprocessed_docs = self._preprocess(tokenized_docs, tid)
+            index = self._produce_index(subindex, preprocessed_docs, tid)
+            self._flush_index(subindex, index, tid)
+
+        except Exception as e:
+            logger.error(f"({tid}) Received unexpected exception: "+
+                         f"{e}. Returning immediately.", exc_info=True)
+
+        try:
+            if not completed:
+                subindex.push_file(fpath, checkpoint)
+        except Exception as e:
+            logger.error(f"({tid}) Error pushing file to subindex: {e}.")
+
+        completed_subindex = False
+        if len(subindex) == 0:
+            logger.info(f"({tid}) Completed subindex with id {subindex.id}")
+            completed_subindex = True
+
+        return subindex, completed_subindex
+
+    def _streamize(self, fpath: str, checkpoint: int, tid="Unknown"):
+        logger.info(f"({tid}) Streamizing doc for path '{fpath}', "+
+                    f"with checkpoint {checkpoint}")
         log_memory_usage(logger)
 
         new_docs = {}
-
         parsed_whole_file = True
         with open(fpath, 'rb') as stream:
-            if fpath in self._file_checkpoint:
-                stream.seek(self._file_checkpoint[fpath])
 
             for record in ArchiveIterator(stream):
+                if stream.tell() < checkpoint:
+                    continue
+
                 url = get_warcio_record_url(record)
                 text = record.content_stream().read()
                 normalized_text = PlaintextParser.normalize_text(text)
@@ -148,39 +206,33 @@ class Indexer:
                 # logger.debug(f"Added URL '{url}'")
                 # logger.debug(f"For URL '{url}', added text: {normalized_text}")
 
+                # TODO: We might need to add a stream EOF condition here
                 if len(new_docs) >= self._max_docs_per_file:
                     parsed_whole_file = False
+                    checkpoint = stream.tell()
                     break
 
-            if not parsed_whole_file:
-                self._file_checkpoint[fpath] = stream.tell()
-
-        if parsed_whole_file:
-            logger.info(f"Finished parsing file '{fpath}'")
-            if fpath in self._file_checkpoint:
-                self._file_checkpoint.pop(fpath)
-
-        logger.info(f"Successfully streamized doc for path '{fpath}'")
+        logger.info(f"({tid}) Successfully streamized doc for path '{fpath}'")
         log_memory_usage(logger)
 
-        return new_docs
+        return new_docs, parsed_whole_file, checkpoint
 
-    def _tokenize(self, docs: Mapping[str, str]) -> Mapping[str, List[str]]:
-        logger.info(f"Tokenizing docs")
+    def _tokenize(self, docs, tid="Unknown") -> Mapping[str, List[str]]:
+        logger.info(f"({tid}) Tokenizing docs")
         log_memory_usage(logger)
 
         tokenized_docs = docs
         for doc in docs:
             tokenized_docs[doc] = nltk.word_tokenize(docs[doc])
 
-        logger.info(f"Successfully tokenized docs")
-        logger.debug(f"Tokenized docs result: {tokenized_docs}")
+        logger.info(f"({tid}) Successfully tokenized docs")
+        logger.debug(f"({tid}) Tokenized docs result: {tokenized_docs}")
         log_memory_usage(logger)
 
         return tokenized_docs
 
-    def _preprocess(self, tokenized_docs: Mapping[str, List[str]]) -> Mapping[str, Mapping[str, int]]:
-        logger.info(f"Preprocessing docs")
+    def _preprocess(self, tokenized_docs, tid="Unknown") -> Mapping[str, Mapping[str, int]]:
+        logger.info(f"({tid}) Preprocessing docs")
         log_memory_usage(logger)
 
         preprocessed_docs = tokenized_docs
@@ -214,39 +266,42 @@ class Indexer:
 
             preprocessed_docs[doc] = processed_word_freq
 
-        logger.info(f"Successfully preprocessed docs")
-        logger.debug(f"Preprocessed docs result: {preprocessed_docs}")
+        logger.info(f"({tid}) Successfully preprocessed docs")
+        logger.debug(f"({tid}) Preprocessed docs result: {preprocessed_docs}")
         log_memory_usage(logger)
 
         return preprocessed_docs
 
-    def _produce_index(self, preprocessed_docs: Mapping[str, Mapping[str, int]]):
-        logger.info(f"Indexing docs")
+    def _produce_index(self, subindex, preprocessed_docs, tid="Unknown"):
+        logger.info(f"({tid}) Indexing docs")
         log_memory_usage(logger)
 
+        index = {}
         for doc in preprocessed_docs:
             word_freq = preprocessed_docs[doc]
             for word in word_freq:
                 freq = word_freq[word]
-                if word not in self._index:
-                    self._index[word] = []
-                self._index[word].append((self._docidx, freq))
-            self._docidx += 1
+                if word not in index:
+                    index[word] = []
+                index[word].append((subindex.docid, freq))
+            subindex.docid += 1
 
-        logger.info(f"Successfully indexed docs")
-        logger.debug(f"Index result: {self._index}")
+        logger.info(f"({tid}) Successfully indexed docs")
+        logger.debug(f"({tid}) Index result: {index}")
         log_memory_usage(logger)
 
-    def _flush_index(self):
-        outfpath = f"{self._subindexes_dir}/{self._docidx}_{self._output_file}"
+        return index
 
-        logger.info(f"Flushing index to path '{outfpath}'")
+    def _flush_index(self, subindex, index, tid="Unknown"):
+        outfpath = (f"{self._subindexes_dir}/"+
+                    f"{subindex.id}_{subindex.docid}_{self._output_file}")
+
+        logger.info(f"({tid}) Flushing index to path '{outfpath}'")
         log_memory_usage(logger)
 
-        write_index(self._index, outfpath)
-        self._index = {}
+        write_index(index, outfpath)
 
-        logger.info(f"Successfully flushed index to path '{outfpath}'")
+        logger.info(f"({tid}) Successfully flushed index to path '{outfpath}'")
         log_memory_usage(logger)
 
     def _merge_index(self):
