@@ -84,19 +84,26 @@ class Indexer:
     def _init_limits(self):
         safe_memory_margin = 0.5
         safe_memory_limit = self._memory_limit * safe_memory_margin
+        min_docs_per_thread = 128
 
         self._absolute_limit_num_threads = int(min(50, len(self._corpus_files) / 2))
-        self._max_num_threads = int(safe_memory_limit /
-                                    self._absolute_limit_num_threads)
-        self._max_docs_per_file = int(safe_memory_limit / self._max_num_threads //
-                                   self._estimate_max_memory_consumed_per_doc)
+        self._max_docs_per_thread = int(max(
+            min_docs_per_thread,
+            safe_memory_limit / (self._estimate_max_memory_consumed_per_doc *
+                                 self._absolute_limit_num_threads)
+        ))
+        self._max_num_threads = int(
+            safe_memory_limit / (self._estimate_max_memory_consumed_per_doc *
+                                 self._max_docs_per_thread)
+        )
         self._num_subindexes = min(2 * self._max_num_threads,
                                    len(self._corpus_files))
 
         logger.info(f"Limit absolute_limit_num_threads="+
                     f"{self._absolute_limit_num_threads}")
         logger.info(f"Limit max_num_threads={self._max_num_threads}")
-        logger.info(f"Limit max_docs_per_file={self._max_docs_per_file}")
+        logger.info(f"Limit max_docs_per_thread={self._max_docs_per_thread}")
+        logger.info(f"Limit num_subindexes={self._num_subindexes}")
 
     # _init_subindexes assumes that the corpus files have already been located.
     def _init_subindexes(self):
@@ -207,7 +214,7 @@ class Indexer:
                 # logger.debug(f"For URL '{url}', added text: {normalized_text}")
 
                 # TODO: We might need to add a stream EOF condition here
-                if len(new_docs) >= self._max_docs_per_file:
+                if len(new_docs) >= self._max_docs_per_thread:
                     parsed_whole_file = False
                     checkpoint = stream.tell()
                     break
@@ -309,32 +316,45 @@ class Indexer:
                     f"'{self._output_file}'")
         log_memory_usage(logger)
 
-        subindex_fpaths = glob.glob(f"{self._subindexes_dir}/*")
-        if len(subindex_fpaths) == 0:
+        fpaths = glob.glob(f"{self._subindexes_dir}/*")
+        if len(fpaths) == 0:
             return
-        if len(subindex_fpaths) == 1:
-            shutil.move(subindex_fpaths.pop(), self._output_file)
+        if len(fpaths) == 1:
+            shutil.move(fpaths.pop(), self._output_file)
             return
 
-        while len(subindex_fpaths) > 1:
-            index1_fpath = subindex_fpaths.pop()
-            index2_fpath = subindex_fpaths.pop()
-            index1 = read_index(index1_fpath)
-            index2 = read_index(index2_fpath)
+        MB = 1024 * 1024
+        max_read_chars = int(self._memory_limit / 8) * MB
 
-            assert len(index1) != 0
-            assert len(index2) != 0
+        while len(fpaths) > 1:
+            log_memory_usage(logger)
 
-            # TODO: maybe not such a good idea to remove these files here
+            index1_fpath = fpaths.pop()
+            index2_fpath = fpaths.pop()
+            
+            checkpoint1 = 0
+            while checkpoint1 != None:
+                index1, checkpoint1 = read_index(index1_fpath, checkpoint1,
+                                                 max_read_chars)
+                logger.info(f"Read index 1. Size: {len(index1)}")
+                
+                checkpoint2 = 0
+                while checkpoint2 != None:
+                    index2, checkpoint2 = read_index(index2_fpath, checkpoint2,
+                                                     max_read_chars)
+                    logger.info(f"Read index 2. Size: {len(index2)}")
+                    
+                    merged_index = merge_indexes(index1, index2)
+                    merged_index_outfpath = index2_fpath + "_"
+                    write_index(merged_index, merged_index_outfpath)
+                    
+            logger.info(f"Done with files '{index1_fpath}' and '{index2_fpath}'")
             os.remove(index1_fpath)
             os.remove(index2_fpath)
+            fpaths = glob.glob(f"{self._subindexes_dir}/*")
 
-            merged_index = merge_indexes(index1, index2)
-            merged_index_outfpath = index1_fpath
-            write_index(merged_index, merged_index_outfpath)
-
-            subindex_fpaths = glob.glob(f"{self._subindexes_dir}/*")
-        shutil.move(subindex_fpaths.pop(), self._output_file)
+        log_memory_usage(logger)
+        shutil.move(fpaths.pop(), output_file)
 
         logger.info(f"Successfully merged index from dir '{self._subindexes_dir}'"+
                     f" to file '{self._output_file}'")

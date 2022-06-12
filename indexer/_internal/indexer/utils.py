@@ -2,12 +2,41 @@ from common.log import log
 
 logger = log.logger()
 
-def read_index(infpath):
+def read_index(infpath, checkpoint, max_read_chars):
+    logger.info(f"Reading index from '{infpath}'.")
+
     index = {}
-    index_str = open(infpath, 'r').read()
-    inverted_lists = [entry for entry in index_str.split("\n") if entry != '']
+
+    read_whole_file = False
+    with open(infpath, 'r', encoding='utf-8') as stream:
+        stream.seek(checkpoint)
+        index_str = stream.read(max_read_chars)
+        assert len(index_str) > 0, "input subindex file is malformed"
+        extra_bytes = 0
+        while index_str[-1] != '\n':
+            new_char = stream.read(1)
+            if len(new_char) == 0:
+                checkpoint = None
+                break
+            index_str += new_char
+            extra_bytes += len(new_char.encode('utf-8'))
+        assert index_str[-1] == '\n' and checkpoint != None, (
+            "input subindex file is malformed")
+
+        # Mark checkpoint as None if reached EOF
+        s = stream.read()
+        if s == '':
+            checkpoint = None
+        else:
+            checkpoint = stream.tell()
+
+    logger.info(f"Read {len(index_str)} chars from '{infpath}'.")
+
+    logger.info(f"Processing inverted lists.")
+
+    inverted_lists = index_str.split("\n")
     for inverted_list in inverted_lists:
-        split_by_space = inverted_list.split(" ")
+        split_by_space = inverted_list.strip().split(" ")
         if len(split_by_space) <= 1:
             continue
 
@@ -17,9 +46,13 @@ def read_index(infpath):
             docfreq_split = docfreq_str.split(",")
             docfreq = (int(docfreq_split[0]), int(docfreq_split[1]))
             index[word].append(docfreq)
-    return index
+
+    logger.info(f"Successfully processed inverted lists.")
+
+    return index, checkpoint
 
 def write_index(index, outfpath):
+    logger.info(f"Writing index to '{outfpath}'")
     with open(outfpath, 'a') as outf:
         for word in index:
             outf.write(word)
@@ -27,14 +60,20 @@ def write_index(index, outfpath):
             for entry in inverted_list:
                 outf.write(f" {entry[0]},{entry[1]}")
             outf.write("\n")
+    logger.info(f"Successfully wrote index to '{outfpath}'")
 
 def merge_indexes(index1, index2):
+    logger.info("Merging indexes")
+
     merged_index = {}
     for word in index1:
         if word in index2:
             merged_index[word] = sorted(index1[word] + index2[word])
         else:
             merged_index[word] = index1[word]
+
+    logger.info("Successfully merged indexes")
+
     return merged_index
 
 def is_useful_warcio_record(record):
