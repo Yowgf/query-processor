@@ -11,7 +11,8 @@ def read_index(infpath, checkpoint, max_read_chars):
     with open(infpath, 'r', encoding='utf-8') as stream:
         stream.seek(checkpoint)
         index_str = stream.read(max_read_chars)
-        assert len(index_str) > 0, "input subindex file is malformed"
+        if len(index_str) == 0:
+            return index, None
         extra_bytes = 0
         while index_str[-1] != '\n':
             new_char = stream.read(1)
@@ -35,6 +36,7 @@ def read_index(infpath, checkpoint, max_read_chars):
     logger.info(f"Processing inverted lists.")
 
     inverted_lists = index_str.split("\n")
+    del(index_str)
     for inverted_list in inverted_lists:
         split_by_space = inverted_list.strip().split(" ")
         if len(split_by_space) <= 1:
@@ -46,19 +48,20 @@ def read_index(infpath, checkpoint, max_read_chars):
             docfreq_split = docfreq_str.split(",")
             docfreq = (int(docfreq_split[0]), int(docfreq_split[1]))
             index[word].append(docfreq)
+    del(inverted_lists)
 
     logger.info(f"Successfully processed inverted lists.")
 
     return index, checkpoint
 
-def write_index(index, outfpath):
+def write_index(index, outfpath, docid_offset):
     logger.info(f"Writing index to '{outfpath}'")
     with open(outfpath, 'a') as outf:
         for word in index:
             outf.write(word)
             inverted_list = index[word]
             for entry in inverted_list:
-                outf.write(f" {entry[0]},{entry[1]}")
+                outf.write(f" {docid_offset + entry[0]},{entry[1]}")
             outf.write("\n")
     logger.info(f"Successfully wrote index to '{outfpath}'")
 
