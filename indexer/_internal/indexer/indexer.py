@@ -75,7 +75,7 @@ class Indexer:
     def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
         truncate_file(self._output_file)
-        truncate_dir(self._subindexes_dir)
+        #truncate_dir(self._subindexes_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
@@ -83,7 +83,7 @@ class Indexer:
         safe_memory_limit = self._memory_limit * safe_memory_margin
         min_docs_per_thread = 128
 
-        self._absolute_limit_num_threads = int(min(50, len(self._corpus_files)))
+        self._absolute_limit_num_threads = int(min(16, len(self._corpus_files)))
         self._max_docs_per_thread = int(max(
             min_docs_per_thread,
             safe_memory_limit / (self._estimate_max_memory_consumed_per_doc *
@@ -117,38 +117,43 @@ class Indexer:
                 file_idx += 1
                 if file_idx >= num_files:
                     break
-        # TODO: fix this 'gambiarra'
-        self._subindexes = [subindex for subindex in self._subindexes if len(subindex) > 0]
 
     def run(self):
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self._max_num_threads
-        ) as executor:
-            results = []
+        # with concurrent.futures.ProcessPoolExecutor(
+        #         max_workers=self._max_num_threads
+        # ) as executor:
+        #     results = []
 
-            subindexes = self._subindexes
+        #     subindexes = self._subindexes
 
-            while True:
-                self._submit_jobs(executor, results, subindexes)
-                subindexes = []
+        #     while True:
+        #         self._submit_jobs(executor, results, subindexes)
+        #         subindexes = []
 
-                completed, not_completed = concurrent.futures.wait(
-                    results,
-                    timeout=5,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                results = list(not_completed)
-                if len(results) == 0:
-                    logger.info("Stopping indexer: no jobs left.")
-                    break
+        #         completed, not_completed = concurrent.futures.wait(
+        #             results,
+        #             timeout=5,
+        #             return_when=concurrent.futures.FIRST_COMPLETED,
+        #         )
+        #         results = list(not_completed)
+        #         if len(results) == 0:
+        #             logger.info("Stopping indexer: no jobs left.")
+        #             break
 
-                for future in completed:
-                    subindex = self._process_complete_job(future)
-                    if subindex != None:
-                        subindexes.append(subindex)
+        #         for future in completed:
+        #             subindex = self._process_complete_job(future)
+        #             if subindex != None:
+        #                 subindexes.append(subindex)
+
+        try:
+            del(executor)
+            gc.collect()        
+        except Exception as e:
+            logger.info(f"Error cleaning up memory from indexes production: {e}",
+                        exc_info=True)
 
         self._merge_index()
-        self._cleanup
+        self._cleanup()
 
     def _submit_jobs(self, executor, results, subindexes):
         for subindex in subindexes:
@@ -264,7 +269,7 @@ class Indexer:
                 for stemmer in self._stemmers:
                     normalized_word = stemmer.stem(normalized_word)
                 # Min 3 chars
-                if len(normalized_word) <= 2:
+                if len(normalized_word) < 3:
                     continue
                 # Max 20 chars
                 if len(normalized_word) > 20:
@@ -321,8 +326,6 @@ class Indexer:
                     f"'{self._output_file}'")
         log_memory_usage(logger)
 
-        gc.collect()
-
         fpaths = glob.glob(f"{self._subindexes_dir}/*")
         if len(fpaths) == 0:
             return
@@ -331,7 +334,7 @@ class Indexer:
             return
 
         MB = 1024 * 1024
-        max_read_chars = int(self._memory_limit / 64) * MB
+        max_read_chars = int(max(1, self._memory_limit / 128)) * MB
 
         while len(fpaths) > 1:
             log_memory_usage(logger)
@@ -344,24 +347,45 @@ class Indexer:
                 index1, checkpoint1 = read_index(index1_fpath, checkpoint1,
                                                  max_read_chars)
                 logger.info(f"Read index 1. Size: {len(index1)}")
+
+                sorted_words_index1 = sorted(list(index1.keys()))
                 
                 checkpoint2 = 0
                 while checkpoint2 != None:
+                    if len(sorted_words_index1) == 0:
+                        break
+                    last_index1 = len(sorted_words_index1) - 1
+                    while (sorted_words_index2[-1] <
+                           sorted_words_index1[last_index1] and
+                           last_index1 > 0):
+                        last_index1 -= 1
+
                     index2, checkpoint2 = read_index(index2_fpath, checkpoint2,
                                                      max_read_chars)
                     logger.info(f"Read index 2. Size: {len(index2)}")
-                    
-                    merged_index = merge_indexes(index1, index2)
-                    del(index2)
+
+                    sorted_words_index2 = sorted(list(index2.keys()))
+
+                    for word in sorted_words_index1[:last_index1]:
+                        if word in index2:
+                            index2[word] = sorted(index2[word] + index1[word])
+                        else:
+                            index2[word] = index1[word]
+                    if last_index1 > 0:
+                        for word in sorted_words_index1[:last_index1]:
+                            index1.pop(word)
+                        sorted_words_index1 = sorted_words_index1[last_index1:]
+
                     merged_index_outfpath = index2_fpath + "_"
-                    write_index(merged_index, merged_index_outfpath, 0)
-                    del(merged_index)
+                    write_index(index2, merged_index_outfpath, 0)
+                write_index(index1, merged_index_outfpath, 0)
+                shutil.move(merged_index_outfpath, index2_fpath)
+
+            del(index2)
             del(index1)
 
-            logger.info(f"Done with files '{index1_fpath}' and '{index2_fpath}'")
+            logger.info(f"Done with file '{index1_fpath}'")
             os.remove(index1_fpath)
-            os.remove(index2_fpath)
-            shutil.move(merged_index_outfpath, index2_fpath)
             fpaths.append(index2_fpath)
 
         log_memory_usage(logger)

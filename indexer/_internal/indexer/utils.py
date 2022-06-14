@@ -3,7 +3,8 @@ from common.log import log
 logger = log.logger()
 
 def read_index(infpath, checkpoint, max_read_chars):
-    logger.info(f"Reading index from '{infpath}'.")
+    logger.info(f"Reading index from '{infpath}' with checkpoint {checkpoint}. "+
+                f"Max chars allowed to read: {max_read_chars}.")
 
     index = {}
 
@@ -25,11 +26,11 @@ def read_index(infpath, checkpoint, max_read_chars):
             "input subindex file is malformed")
 
         # Mark checkpoint as None if reached EOF
-        s = stream.read()
+        s = stream.read(1)
         if s == '':
             checkpoint = None
         else:
-            checkpoint = stream.tell()
+            checkpoint = stream.tell() - len(s.encode('utf-8'))
 
     logger.info(f"Read {len(index_str)} chars from '{infpath}'.")
 
@@ -48,7 +49,9 @@ def read_index(infpath, checkpoint, max_read_chars):
             docfreq_split = docfreq_str.split(",")
             docfreq = (int(docfreq_split[0]), int(docfreq_split[1]))
             index[word].append(docfreq)
-    del(inverted_lists)
+    if len(inverted_lists) > 0:
+        del(inverted_lists)
+        del(split_by_space)
 
     logger.info(f"Successfully processed inverted lists.")
 
@@ -56,8 +59,9 @@ def read_index(infpath, checkpoint, max_read_chars):
 
 def write_index(index, outfpath, docid_offset):
     logger.info(f"Writing index to '{outfpath}'")
-    with open(outfpath, 'a') as outf:
-        for word in index:
+    with open(outfpath, 'a', encoding='utf-8') as outf:
+        sorted_words = sorted(list(index.keys()))
+        for word in sorted_words:
             outf.write(word)
             inverted_list = index[word]
             for entry in inverted_list:
@@ -65,17 +69,19 @@ def write_index(index, outfpath, docid_offset):
             outf.write("\n")
     logger.info(f"Successfully wrote index to '{outfpath}'")
 
-def merge_indexes(index1, index2):
-    logger.info("Merging indexes")
+def merge_indexes(this, other):
+    logger.info(f"Merging indexes. Size of this: {len(this)}. "+
+                f"Size of other: {len(other)}")
 
-    merged_index = {}
-    for word in index1:
-        if word in index2:
-            merged_index[word] = sorted(index1[word] + index2[word])
+    merged_index = this
+    for word in other:
+        if word in this:
+            this[word] = sorted(this[word] + other[word])
         else:
-            merged_index[word] = index1[word]
+            this[word] = other[word]
 
-    logger.info("Successfully merged indexes")
+    logger.info(f"Successfully merged indexes. Size of merged index: "+
+                f"{len(merged_index)}")
 
     return merged_index
 
