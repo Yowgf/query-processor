@@ -146,7 +146,7 @@ class Indexer:
         #                 subindexes.append(subindex)
 
         try:
-            del(executor)
+            del executor
             gc.collect()        
         except Exception as e:
             logger.info(f"Error cleaning up memory from indexes production: {e}",
@@ -334,55 +334,102 @@ class Indexer:
             return
 
         MB = 1024 * 1024
-        max_read_chars = int(max(1, self._memory_limit / 128)) * MB
+        max_read_chars = int(max(1, (self._memory_limit / 1024) ** 2 * 8)) * MB
 
         while len(fpaths) > 1:
             log_memory_usage(logger)
 
             index1_fpath = fpaths.pop(0)
             index2_fpath = fpaths.pop(0)
-            
+            merged_index_outfpath = index2_fpath + "_"
+
             checkpoint1 = 0
+            checkpoint2 = 0
             while checkpoint1 != None:
                 index1, checkpoint1 = read_index(index1_fpath, checkpoint1,
                                                  max_read_chars)
                 logger.info(f"Read index 1. Size: {len(index1)}")
 
-                sorted_words_index1 = sorted(list(index1.keys()))
-                
-                checkpoint2 = 0
+                if checkpoint2 != None:
+                    sorted_words_index1 = sorted(list(index1.keys()))
                 while checkpoint2 != None:
                     if len(sorted_words_index1) == 0:
                         break
-                    last_index1 = len(sorted_words_index1) - 1
-                    while (sorted_words_index2[-1] <
-                           sorted_words_index1[last_index1] and
-                           last_index1 > 0):
-                        last_index1 -= 1
 
                     index2, checkpoint2 = read_index(index2_fpath, checkpoint2,
                                                      max_read_chars)
                     logger.info(f"Read index 2. Size: {len(index2)}")
+                    if len(index2) == 0:
+                        continue
 
                     sorted_words_index2 = sorted(list(index2.keys()))
+                    last_index1 = len(sorted_words_index1) - 1
+                    while checkpoint1 != None:
+                        while (sorted_words_index2[-1] <
+                               sorted_words_index1[last_index1] and last_index1 > 0
+                        ):
+                            last_index1 -= 1
+                        if last_index1 != len(sorted_words_index1) - 1:
+                            break
+
+                        for word in sorted_words_index1:
+                            if word in index2:
+                                index2[word] = sorted(index2[word] + index1[word])
+                            else:
+                                index2[word] = index1[word]
+                        del index1
+                        del sorted_words_index1
+                        gc.collect()
+
+                        # If index1 is entirely within index2, we should read
+                        # new piece of index1 from file, to make sure that we
+                        # aren't missing out on some piece of index1 when
+                        # merging with index2.
+                        #
+                        # Example:
+                        #
+                        # index1 = {
+                        #  "a": [(1,2)],
+                        #  "b": [(1,1)]
+                        # }
+                        #
+                        # index2 = {
+                        #  "b": [(3,4)]
+                        # }
+                        #
+                        # Notice that b >= b >= a, so last_index1 == 0
+                        #
+                        index1, checkpoint1 = read_index(
+                            index1_fpath, checkpoint1, max_read_chars)
+                        logger.info(f"Read index 1 inside internal loop. "+
+                                    f"Size: {len(index1)}")
+                        sorted_words_index1 = sorted(list(index1.keys()))
+                        last_index1 = len(sorted_words_index1) - 1
+                        while (sorted_words_index2[-1] <
+                               sorted_words_index1[last_index1] and last_index1 > 0
+                        ):
+                            last_index1 -= 1
 
                     for word in sorted_words_index1[:last_index1]:
                         if word in index2:
                             index2[word] = sorted(index2[word] + index1[word])
                         else:
                             index2[word] = index1[word]
-                    if last_index1 > 0:
-                        for word in sorted_words_index1[:last_index1]:
-                            index1.pop(word)
-                        sorted_words_index1 = sorted_words_index1[last_index1:]
 
-                    merged_index_outfpath = index2_fpath + "_"
+                    # Remove merged words from index1
+                    for word in sorted_words_index1[:last_index1 + 1]:
+                        index1.pop(word)
+                    sorted_words_index1 = sorted_words_index1[last_index1 + 1:]
+
                     write_index(index2, merged_index_outfpath, 0)
-                write_index(index1, merged_index_outfpath, 0)
-                shutil.move(merged_index_outfpath, index2_fpath)
+                    del index2
+                    gc.collect()
 
-            del(index2)
-            del(index1)
+                write_index(index1, merged_index_outfpath, 0)
+                del index1
+                gc.collect()
+
+            shutil.move(merged_index_outfpath, index2_fpath)
 
             logger.info(f"Done with file '{index1_fpath}'")
             os.remove(index1_fpath)

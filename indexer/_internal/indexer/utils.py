@@ -37,7 +37,7 @@ def read_index(infpath, checkpoint, max_read_chars):
     logger.info(f"Processing inverted lists.")
 
     inverted_lists = index_str.split("\n")
-    del(index_str)
+    del index_str
     for inverted_list in inverted_lists:
         split_by_space = inverted_list.strip().split(" ")
         if len(split_by_space) <= 1:
@@ -50,8 +50,8 @@ def read_index(infpath, checkpoint, max_read_chars):
             docfreq = (int(docfreq_split[0]), int(docfreq_split[1]))
             index[word].append(docfreq)
     if len(inverted_lists) > 0:
-        del(inverted_lists)
-        del(split_by_space)
+        del inverted_lists
+        del split_by_space
 
     logger.info(f"Successfully processed inverted lists.")
 
