@@ -1,3 +1,4 @@
+
 import concurrent.futures
 import gc
 import glob
@@ -17,7 +18,9 @@ from .utils import merge_indexes
 from .utils import is_useful_warcio_record
 from .utils import get_warcio_record_url
 from common.log import log
-from common.metrics.tracker import log_memory_usage
+from common.memory.defs import MEGABYTE
+from common.memory.limit import memory_limit
+from common.memory.tracker import log_memory_usage
 from common.utils.utils import truncate_file
 from common.utils.utils import truncate_dir
 
@@ -25,8 +28,11 @@ logger = log.logger()
 
 # TODOs:
 #
-# - make sure subindexes are being generated with right memory utilization by
-#   letting the program run for a while.
+# - Include printed information according to specification.
+#
+# - Log the file associated with each subindex, as well as the limit 12_000, so
+# - that it is possible to trace back the documents that contain some word with
+# - the final index.
 #
 # - test merging algorithm by letting it run for a while, and then over
 #   night. If it is successful, we should have our final index at hands!
@@ -75,33 +81,40 @@ class Indexer:
     def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
         truncate_file(self._output_file)
-        #truncate_dir(self._subindexes_dir)
+        truncate_dir(self._subindexes_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
         safe_memory_margin = 0.5
-        safe_memory_limit = self._memory_limit * safe_memory_margin
-        min_docs_per_thread = 128
+        min_docs_per_process = 50
 
-        self._absolute_limit_num_threads = int(min(16, len(self._corpus_files)))
-        self._max_docs_per_thread = int(max(
-            min_docs_per_thread,
-            safe_memory_limit / (self._estimate_max_memory_consumed_per_doc *
-                                 self._absolute_limit_num_threads)
-        ))
-        self._max_num_threads = int(
-            safe_memory_limit / (self._estimate_max_memory_consumed_per_doc *
-                                 self._max_docs_per_thread)
+        # The maximum of processes was imposed due to specific requirements of
+        # the assignment. This should be more flexible in a production-level
+        # implementation.
+        self._max_num_process = int(min(8, len(self._corpus_files)))
+        safe_memory_limit = int(
+            (self._memory_limit * safe_memory_margin) / self._max_num_process
         )
-        self._num_subindexes = min(2 * self._max_num_threads,
+        self._max_docs_per_process = int(max(
+            min_docs_per_process,
+            safe_memory_limit / (self._estimate_max_memory_consumed_per_doc *
+                                 self._max_num_process)
+        ))
+        self._num_subindexes = min(2 * self._max_num_process,
                                    len(self._corpus_files))
-        # TODO: find out dinamically
-        self._max_docs_per_subindex = 12_000
 
-        logger.info(f"Limit absolute_limit_num_threads="+
-                    f"{self._absolute_limit_num_threads}")
-        logger.info(f"Limit max_num_threads={self._max_num_threads}")
-        logger.info(f"Limit max_docs_per_thread={self._max_docs_per_thread}")
+        self._memory_per_subprocess = int(
+            self._memory_limit / (self._max_num_process + 1)
+        )
+
+        # No more than 12K docs per file
+        self._max_docs_in_file = 12_000
+
+        # Print limits in alphabetical order.
+        logger.info(f"Limit max_docs_in_file={self._max_docs_in_file}")
+        logger.info(f"Limit max_docs_per_process={self._max_docs_per_process}")
+        logger.info(f"Limit max_num_process={self._max_num_process}")
+        logger.info(f"Limit memory_per_subprocess={self._memory_per_subprocess}")
         logger.info(f"Limit num_subindexes={self._num_subindexes}")
 
     # _init_subindexes assumes that the corpus files have already been located.
@@ -118,32 +131,38 @@ class Indexer:
                 if file_idx >= num_files:
                     break
 
+        # Define the document offset of each subindex.
+        num_files = 0
+        for subindex in self._subindexes:
+            subindex.docid_offset = num_files * self._max_docs_in_file
+            num_files += len(subindex)
+
     def run(self):
-        # with concurrent.futures.ProcessPoolExecutor(
-        #         max_workers=self._max_num_threads
-        # ) as executor:
-        #     results = []
+        with concurrent.futures.ProcessPoolExecutor(
+                max_workers=self._max_num_process
+        ) as executor:
+            results = []
 
-        #     subindexes = self._subindexes
+            subindexes = self._subindexes
 
-        #     while True:
-        #         self._submit_jobs(executor, results, subindexes)
-        #         subindexes = []
+            while True:
+                self._submit_jobs(executor, results, subindexes)
+                subindexes = []
 
-        #         completed, not_completed = concurrent.futures.wait(
-        #             results,
-        #             timeout=5,
-        #             return_when=concurrent.futures.FIRST_COMPLETED,
-        #         )
-        #         results = list(not_completed)
-        #         if len(results) == 0:
-        #             logger.info("Stopping indexer: no jobs left.")
-        #             break
+                completed, not_completed = concurrent.futures.wait(
+                    results,
+                    timeout=5,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                results = list(not_completed)
+                if len(results) == 0:
+                    logger.info("Stopping indexer: no jobs left.")
+                    break
 
-        #         for future in completed:
-        #             subindex = self._process_complete_job(future)
-        #             if subindex != None:
-        #                 subindexes.append(subindex)
+                for future in completed:
+                    subindex = self._process_complete_job(future)
+                    if subindex != None:
+                        subindexes.append(subindex)
 
         try:
             del executor
@@ -171,20 +190,39 @@ class Indexer:
         os.rmdir(self._subindexes_dir)
 
     def _run(self, subindex):
+        memory_limit(self._memory_per_subprocess)
+
         tid = get_ident()
 
+        old_docid = subindex.docid
         try:
-            fpath, checkpoint = subindex.pop_file()
+            fpath, old_checkpoint = subindex.pop_file()
 
-            docs, completed, checkpoint = self._streamize(fpath, checkpoint, tid)
+            docs, completed, checkpoint = self._streamize(fpath, old_checkpoint, tid)
             tokenized_docs = self._tokenize(docs, tid)
+            del docs
             preprocessed_docs = self._preprocess(tokenized_docs, tid)
-            index = self._produce_index(subindex, preprocessed_docs, tid)
+            del tokenized_docs
+            gc.collect()
+            index, new_docid = self._produce_index(subindex, preprocessed_docs, tid)
             self._flush_index(subindex, index, tid)
-
+            # Only increment subindex docid after really done with portion of
+            # index.
+            subindex.docid = new_docid
+            del index
+            gc.collect()
         except Exception as e:
             logger.error(f"({tid}) Received unexpected exception: "+
                          f"{e}. Returning immediately.", exc_info=True)
+            try:
+                # Here we don't care if the file was fully processed or not. We
+                # need to restore the previous state so that we can try again.
+                subindex.docid = old_docid
+                subindex.push_file(fpath, old_checkpoint)
+                return subindex, False
+            except Exception as e:
+                logger.error(f"({tid}) Error pushing file to subindex: {e}.")
+                return subindex, False
 
         try:
             if not completed:
@@ -220,7 +258,7 @@ class Indexer:
                 # logger.debug(f"For URL '{url}', added text: {normalized_text}")
 
                 # TODO: We might need to add a stream EOF condition here
-                if len(new_docs) >= self._max_docs_per_thread:
+                if len(new_docs) >= self._max_docs_per_process:
                     parsed_whole_file = False
                     checkpoint = stream.tell()
                     break
@@ -293,20 +331,21 @@ class Indexer:
         log_memory_usage(logger)
 
         index = {}
+        docid = subindex.docid
         for doc in preprocessed_docs:
             word_freq = preprocessed_docs[doc]
             for word in word_freq:
                 freq = word_freq[word]
                 if word not in index:
                     index[word] = []
-                index[word].append((subindex.docid, freq))
-            subindex.docid += 1
+                index[word].append((docid, freq))
+            docid += 1
 
         logger.info(f"({tid}) Successfully indexed docs")
         logger.debug(f"({tid}) Index result: {index}")
         log_memory_usage(logger)
 
-        return index
+        return index, docid
 
     def _flush_index(self, subindex, index, tid="Unknown"):
         outfpath = (f"{self._subindexes_dir}/"+
@@ -315,8 +354,7 @@ class Indexer:
         logger.info(f"({tid}) Flushing index to path '{outfpath}'")
         log_memory_usage(logger)
 
-        docid_offset = subindex.id * self._max_docs_per_subindex
-        write_index(index, outfpath, docid_offset)
+        write_index(index, outfpath, subindex.docid_offset)
 
         logger.info(f"({tid}) Successfully flushed index to path '{outfpath}'")
         log_memory_usage(logger)
@@ -333,8 +371,7 @@ class Indexer:
             shutil.move(fpaths.pop(), self._output_file)
             return
 
-        MB = 1024 * 1024
-        max_read_chars = int(max(1, (self._memory_limit / 1024) ** 2 * 8)) * MB
+        max_read_chars = int(max(1, (self._memory_limit / 1024) ** 2 * 8)) * MEGABYTE
 
         while len(fpaths) > 1:
             log_memory_usage(logger)

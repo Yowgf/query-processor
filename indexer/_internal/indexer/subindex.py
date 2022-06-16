@@ -1,9 +1,10 @@
 from typing import List
 
 class Subindex:
-    def __init__(self, id: int):
+    def __init__(self, id: int, docid_offset: int = 0):
         self.id = id
         self.docid = 0
+        self.docid_offset = 0
         self._files: Mapping[str, int] = {}
 
     def __len__(self):

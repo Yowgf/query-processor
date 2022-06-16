@@ -1,5 +1,7 @@
 import tracemalloc
 
+from .defs import MEGABYTE
+
 class Tracker:
     tracking = False
 
@@ -17,8 +19,7 @@ def log_memory_usage(logger):
         return
 
     current_bytes, peak_bytes = tracemalloc.get_traced_memory()
-    MB = 1024 * 1024
-    current_mb = current_bytes / MB
-    peak_mb = peak_bytes / MB
+    current_mb = current_bytes / MEGABYTE
+    peak_mb = peak_bytes / MEGABYTE
     logger.info(f"Current memory usage: {current_mb:.2f}MB. "+
                 f"Peak memory usage: {peak_mb:.2f}MB.")

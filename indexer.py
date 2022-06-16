@@ -1,17 +1,15 @@
 import sys
-import resource
 import argparse
 
 from common.log import log
-from common.metrics.tracker import Tracker
+from common.memory.limit import memory_limit
+from common.memory.tracker import Tracker
 from indexer.main import main as indexer_main
 
 logger = log.logger()
 
-MEGABYTE = 1024 * 1024
-def memory_limit(value):
-    limit = value * MEGABYTE
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+# the memory_limit function was transferred to common.memory.limit to allow code
+# reuse.
 
 def main(args):
     indexer_main(args)
