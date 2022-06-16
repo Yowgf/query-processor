@@ -1,5 +1,5 @@
-
 import concurrent.futures
+from datetime import datetime
 import gc
 import glob
 import os
@@ -11,6 +11,7 @@ from warcio.archiveiterator import ArchiveIterator
 import nltk
 
 from .parser import PlaintextParser
+from .statistics import Statistics
 from .subindex import Subindex
 from .utils import read_index
 from .utils import write_index
@@ -80,8 +81,8 @@ class Indexer:
 
     def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
-        truncate_file(self._output_file)
-        truncate_dir(self._subindexes_dir)
+        # truncate_file(self._output_file)
+        # truncate_dir(self._subindexes_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
@@ -110,10 +111,14 @@ class Indexer:
         # No more than 12K docs per file
         self._max_docs_in_file = 12_000
 
+        self._max_read_chars = int(
+            max(1, (self._memory_limit / 1024) ** 2 * 8)) * MEGABYTE
+
         # Print limits in alphabetical order.
         logger.info(f"Limit max_docs_in_file={self._max_docs_in_file}")
         logger.info(f"Limit max_docs_per_process={self._max_docs_per_process}")
         logger.info(f"Limit max_num_process={self._max_num_process}")
+        logger.info(f"Limit max_read_chars={self._max_read_chars}")
         logger.info(f"Limit memory_per_subprocess={self._memory_per_subprocess}")
         logger.info(f"Limit num_subindexes={self._num_subindexes}")
 
@@ -138,6 +143,8 @@ class Indexer:
             num_files += len(subindex)
 
     def run(self):
+        before = datetime.now()
+
         with concurrent.futures.ProcessPoolExecutor(
                 max_workers=self._max_num_process
         ) as executor:
@@ -172,6 +179,14 @@ class Indexer:
                         exc_info=True)
 
         self._merge_index()
+
+        elapsed_secs = (datetime.now() - before).seconds
+
+        statistics = self._gather_statistics()
+        statistics.set_elapsed_time(elapsed_secs)
+
+        print(statistics.to_json())
+
         self._cleanup()
 
     def _submit_jobs(self, executor, results, subindexes):
@@ -187,7 +202,40 @@ class Indexer:
             return None
 
     def _cleanup(self):
-        os.rmdir(self._subindexes_dir)
+        try:
+            os.rmdir(self._subindexes_dir)
+        except FileNotFoundError:
+            pass
+
+    # _gather_statistics reads the final output file, counting the number of
+    # lists etc to generate final statistics for the indexer run.
+    def _gather_statistics(self):
+        index_size = int(os.stat(self._output_file).st_size / MEGABYTE)
+
+        num_lists = 0
+        list_sizes = []
+        avg_list_size = 0
+
+        checkpoint = 0
+        while checkpoint != None:
+            index, checkpoint = read_index(
+                self._output_file, checkpoint, self._max_read_chars)
+
+            for word in index:
+                list_sizes.append(len(index[word]))
+                num_lists += 1
+
+            del index
+            gc.collect()
+
+        avg_list_size = round(sum(list_sizes) / len(list_sizes), 1)
+
+        statistics = Statistics()
+        statistics.set_index_size(index_size)
+        statistics.set_num_lists(num_lists)
+        statistics.set_avg_list_size(avg_list_size)
+
+        return statistics
 
     def _run(self, subindex):
         memory_limit(self._memory_per_subprocess)
@@ -371,8 +419,6 @@ class Indexer:
             shutil.move(fpaths.pop(), self._output_file)
             return
 
-        max_read_chars = int(max(1, (self._memory_limit / 1024) ** 2 * 8)) * MEGABYTE
-
         while len(fpaths) > 1:
             log_memory_usage(logger)
 
@@ -384,7 +430,7 @@ class Indexer:
             checkpoint2 = 0
             while checkpoint1 != None:
                 index1, checkpoint1 = read_index(index1_fpath, checkpoint1,
-                                                 max_read_chars)
+                                                 self._max_read_chars)
                 logger.info(f"Read index 1. Size: {len(index1)}")
 
                 if checkpoint2 != None:
@@ -394,7 +440,7 @@ class Indexer:
                         break
 
                     index2, checkpoint2 = read_index(index2_fpath, checkpoint2,
-                                                     max_read_chars)
+                                                     self._max_read_chars)
                     logger.info(f"Read index 2. Size: {len(index2)}")
                     if len(index2) == 0:
                         continue
@@ -437,7 +483,7 @@ class Indexer:
                         # Notice that b >= b >= a, so last_index1 == 0
                         #
                         index1, checkpoint1 = read_index(
-                            index1_fpath, checkpoint1, max_read_chars)
+                            index1_fpath, checkpoint1, self._max_read_chars)
                         logger.info(f"Read index 1 inside internal loop. "+
                                     f"Size: {len(index1)}")
                         sorted_words_index1 = sorted(list(index1.keys()))
