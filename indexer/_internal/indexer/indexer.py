@@ -81,18 +81,18 @@ class Indexer:
 
     def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
-        # truncate_file(self._output_file)
-        # truncate_dir(self._subindexes_dir)
+        truncate_file(self._output_file)
+        truncate_dir(self._subindexes_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
         safe_memory_margin = 0.5
-        min_docs_per_process = 50
+        min_docs_per_process = 25
 
         # The maximum of processes was imposed due to specific requirements of
         # the assignment. This should be more flexible in a production-level
         # implementation.
-        self._max_num_process = int(min(8, len(self._corpus_files)))
+        self._max_num_process = int(min(6, len(self._corpus_files)))
         safe_memory_limit = int(
             (self._memory_limit * safe_memory_margin) / self._max_num_process
         )
@@ -111,14 +111,22 @@ class Indexer:
         # No more than 12K docs per file
         self._max_docs_in_file = 12_000
 
-        self._max_read_chars = int(
-            max(1, (self._memory_limit / 1024) ** 2 * 8)) * MEGABYTE
+        self._max_read_chars_subindex = int(
+            (self._memory_limit / 1024) ** 2 * 8 * MEGABYTE
+        )
+
+        self._bytes_per_warcio_record = 16384
+        self._max_read_bytes_warcio = int(
+            (self._memory_limit / 1024) ** 2 * (
+                self._bytes_per_warcio_record * 8
+            )
+        )
 
         # Print limits in alphabetical order.
         logger.info(f"Limit max_docs_in_file={self._max_docs_in_file}")
         logger.info(f"Limit max_docs_per_process={self._max_docs_per_process}")
         logger.info(f"Limit max_num_process={self._max_num_process}")
-        logger.info(f"Limit max_read_chars={self._max_read_chars}")
+        logger.info(f"Limit max_read_chars_subindex={self._max_read_chars_subindex}")
         logger.info(f"Limit memory_per_subprocess={self._memory_per_subprocess}")
         logger.info(f"Limit num_subindexes={self._num_subindexes}")
 
@@ -219,7 +227,7 @@ class Indexer:
         checkpoint = 0
         while checkpoint != None:
             index, checkpoint = read_index(
-                self._output_file, checkpoint, self._max_read_chars)
+                self._output_file, checkpoint, self._max_read_chars_subindex)
 
             for word in index:
                 list_sizes.append(len(index[word]))
@@ -240,27 +248,29 @@ class Indexer:
     def _run(self, subindex):
         memory_limit(self._memory_per_subprocess)
 
-        tid = get_ident()
+        gc.collect()
+
+        pid = os.getpid()
 
         old_docid = subindex.docid
         try:
             fpath, old_checkpoint = subindex.pop_file()
 
-            docs, completed, checkpoint = self._streamize(fpath, old_checkpoint, tid)
-            tokenized_docs = self._tokenize(docs, tid)
+            docs, completed, checkpoint = self._streamize(fpath, old_checkpoint, pid)
+            tokenized_docs = self._tokenize(docs, pid)
             del docs
-            preprocessed_docs = self._preprocess(tokenized_docs, tid)
+            preprocessed_docs = self._preprocess(tokenized_docs, pid)
             del tokenized_docs
             gc.collect()
-            index, new_docid = self._produce_index(subindex, preprocessed_docs, tid)
-            self._flush_index(subindex, index, tid)
+            index, new_docid = self._produce_index(subindex, preprocessed_docs, pid)
+            self._flush_index(subindex, index, pid)
             # Only increment subindex docid after really done with portion of
             # index.
             subindex.docid = new_docid
             del index
             gc.collect()
         except Exception as e:
-            logger.error(f"({tid}) Received unexpected exception: "+
+            logger.error(f"({pid}) Received unexpected exception: "+
                          f"{e}. Returning immediately.", exc_info=True)
             try:
                 # Here we don't care if the file was fully processed or not. We
@@ -269,25 +279,25 @@ class Indexer:
                 subindex.push_file(fpath, old_checkpoint)
                 return subindex, False
             except Exception as e:
-                logger.error(f"({tid}) Error pushing file to subindex: {e}.")
+                logger.error(f"({pid}) Error pushing file to subindex: {e}.")
                 return subindex, False
 
         try:
             if not completed:
                 subindex.push_file(fpath, checkpoint)
         except Exception as e:
-            logger.error(f"({tid}) Error pushing file to subindex: {e}.")
+            logger.error(f"({pid}) Error pushing file to subindex: {e}.")
 
         completed_subindex = False
         if len(subindex) == 0:
-            logger.info(f"({tid}) Completed subindex with id {subindex.id}")
+            logger.info(f"({pid}) Completed subindex with id {subindex.id}")
             completed_subindex = True
 
         return subindex, completed_subindex
 
-    def _streamize(self, fpath: str, checkpoint: int, tid="Unknown"):
-        logger.info(f"({tid}) Streamizing doc for path '{fpath}', "+
-                    f"with checkpoint {checkpoint}")
+    def _streamize(self, fpath: str, old_checkpoint: int, pid="Unknown"):
+        logger.info(f"({pid}) Streamizing doc for path '{fpath}', "+
+                    f"with old_checkpoint {old_checkpoint}")
         log_memory_usage(logger)
 
         new_docs = {}
@@ -295,43 +305,44 @@ class Indexer:
         with open(fpath, 'rb') as stream:
 
             for record in ArchiveIterator(stream):
-                if stream.tell() < checkpoint:
+                if stream.tell() < old_checkpoint:
                     continue
+                if (stream.tell() - old_checkpoint >=
+                    self._max_read_bytes_warcio
+                ):
+                    parsed_whole_file = False
+                    break
 
                 url = get_warcio_record_url(record)
                 text = record.content_stream().read()
+
                 normalized_text = PlaintextParser.normalize_text(text)
                 new_docs[url] = normalized_text
-                # logger.debug(f"Added URL '{url}'")
-                # logger.debug(f"For URL '{url}', added text: {normalized_text}")
 
-                # TODO: We might need to add a stream EOF condition here
-                if len(new_docs) >= self._max_docs_per_process:
-                    parsed_whole_file = False
-                    checkpoint = stream.tell()
-                    break
+            new_checkpoint = stream.tell()
 
-        logger.info(f"({tid}) Successfully streamized doc for path '{fpath}'")
+        logger.info(f"({pid}) Successfully streamized doc for path '{fpath}'. "+
+                    f"Size of docs: {len(new_docs)}. Number of bytes read: "+
+                    f"{new_checkpoint - old_checkpoint}")
         log_memory_usage(logger)
 
-        return new_docs, parsed_whole_file, checkpoint
+        return new_docs, parsed_whole_file, new_checkpoint
 
-    def _tokenize(self, docs, tid="Unknown") -> Mapping[str, List[str]]:
-        logger.info(f"({tid}) Tokenizing docs")
+    def _tokenize(self, docs, pid="Unknown") -> Mapping[str, List[str]]:
+        logger.info(f"({pid}) Tokenizing docs")
         log_memory_usage(logger)
 
-        tokenized_docs = docs
         for doc in docs:
-            tokenized_docs[doc] = nltk.word_tokenize(docs[doc])
+            docs[doc] = nltk.word_tokenize(docs[doc])
 
-        logger.info(f"({tid}) Successfully tokenized docs")
-        logger.debug(f"({tid}) Tokenized docs result: {tokenized_docs}")
+        logger.info(f"({pid}) Successfully tokenized docs")
+        logger.debug(f"({pid}) Tokenized docs len: {len(docs)}")
         log_memory_usage(logger)
 
-        return tokenized_docs
+        return docs
 
-    def _preprocess(self, tokenized_docs, tid="Unknown") -> Mapping[str, Mapping[str, int]]:
-        logger.info(f"({tid}) Preprocessing docs")
+    def _preprocess(self, tokenized_docs, pid="Unknown") -> Mapping[str, Mapping[str, int]]:
+        logger.info(f"({pid}) Preprocessing docs")
         log_memory_usage(logger)
 
         preprocessed_docs = tokenized_docs
@@ -368,14 +379,14 @@ class Indexer:
 
             preprocessed_docs[doc] = processed_word_freq
 
-        logger.info(f"({tid}) Successfully preprocessed docs")
-        logger.debug(f"({tid}) Preprocessed docs result: {preprocessed_docs}")
+        logger.info(f"({pid}) Successfully preprocessed docs")
+        logger.debug(f"({pid}) Preprocessed docs len: {len(preprocessed_docs)}")
         log_memory_usage(logger)
 
         return preprocessed_docs
 
-    def _produce_index(self, subindex, preprocessed_docs, tid="Unknown"):
-        logger.info(f"({tid}) Indexing docs")
+    def _produce_index(self, subindex, preprocessed_docs, pid="Unknown"):
+        logger.info(f"({pid}) Indexing docs")
         log_memory_usage(logger)
 
         index = {}
@@ -389,22 +400,22 @@ class Indexer:
                 index[word].append((docid, freq))
             docid += 1
 
-        logger.info(f"({tid}) Successfully indexed docs")
-        logger.debug(f"({tid}) Index result: {index}")
+        logger.info(f"({pid}) Successfully indexed docs")
+        logger.debug(f"({pid}) Index result: {index}")
         log_memory_usage(logger)
 
         return index, docid
 
-    def _flush_index(self, subindex, index, tid="Unknown"):
+    def _flush_index(self, subindex, index, pid="Unknown"):
         outfpath = (f"{self._subindexes_dir}/"+
                     f"{subindex.id}_{subindex.docid}_{self._output_file}")
 
-        logger.info(f"({tid}) Flushing index to path '{outfpath}'")
+        logger.info(f"({pid}) Flushing index to path '{outfpath}'")
         log_memory_usage(logger)
 
         write_index(index, outfpath, subindex.docid_offset)
 
-        logger.info(f"({tid}) Successfully flushed index to path '{outfpath}'")
+        logger.info(f"({pid}) Successfully flushed index to path '{outfpath}'")
         log_memory_usage(logger)
 
     def _merge_index(self):
@@ -430,7 +441,7 @@ class Indexer:
             checkpoint2 = 0
             while checkpoint1 != None:
                 index1, checkpoint1 = read_index(index1_fpath, checkpoint1,
-                                                 self._max_read_chars)
+                                                 self._max_read_chars_subindex)
                 logger.info(f"Read index 1. Size: {len(index1)}")
 
                 if checkpoint2 != None:
@@ -440,7 +451,7 @@ class Indexer:
                         break
 
                     index2, checkpoint2 = read_index(index2_fpath, checkpoint2,
-                                                     self._max_read_chars)
+                                                     self._max_read_chars_subindex)
                     logger.info(f"Read index 2. Size: {len(index2)}")
                     if len(index2) == 0:
                         continue
@@ -483,7 +494,7 @@ class Indexer:
                         # Notice that b >= b >= a, so last_index1 == 0
                         #
                         index1, checkpoint1 = read_index(
-                            index1_fpath, checkpoint1, self._max_read_chars)
+                            index1_fpath, checkpoint1, self._max_read_chars_subindex)
                         logger.info(f"Read index 1 inside internal loop. "+
                                     f"Size: {len(index1)}")
                         sorted_words_index1 = sorted(list(index1.keys()))
