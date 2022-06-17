@@ -51,10 +51,12 @@ class Indexer:
         self._corpus = config.corpus
         self._memory_limit = config.memory_limit
         self._output_file = config.output_file
+        self._generate_url_mapping = config.generate_url_mapping
 
         self._corpus_files = None
         self._index: Mapping[str, List[Tuple[int, int]]] = {}
         self._subindexes_dir = "subindexes"
+        self._urlmapping_dir = "urlmapping"
 
         # Dict filepath -> URL where we left off
         self._file_checkpoint = {}
@@ -83,6 +85,8 @@ class Indexer:
         self._corpus_files = glob.glob(self._corpus + "/*")
         truncate_file(self._output_file)
         truncate_dir(self._subindexes_dir)
+        if self._generate_url_mapping:
+            truncate_dir(self._urlmapping_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
@@ -389,9 +393,18 @@ class Indexer:
         logger.info(f"({pid}) Indexing docs")
         log_memory_usage(logger)
 
+        if self._generate_url_mapping:
+            urlmapping_fpath = (f"{self._urlmapping_dir}/"+
+                                f"{subindex.id}_{subindex.docid}_"+
+                                f"{self._output_file}")
+            url_mapping = {}
+
         index = {}
         docid = subindex.docid
         for doc in preprocessed_docs:
+            if self._generate_url_mapping:
+                url_mapping[docid + subindex.docid_offset] = doc
+
             word_freq = preprocessed_docs[doc]
             for word in word_freq:
                 freq = word_freq[word]
@@ -399,6 +412,12 @@ class Indexer:
                     index[word] = []
                 index[word].append((docid, freq))
             docid += 1
+
+        if self._generate_url_mapping:
+            with open(urlmapping_fpath, "w") as f:
+                for url in url_mapping:
+                    if url != ' ':
+                        f.write(f"{url_mapping[url]} {url} ")
 
         logger.info(f"({pid}) Successfully indexed docs")
         logger.debug(f"({pid}) Index result: {index}")

@@ -57,6 +57,14 @@ if __name__ == "__main__":
         help=("Whether should track memory usage. Enabling this option "+
               "significantly affects program performance.")
     )
+    parser.add_argument(
+        '-generate-url-mapping',
+        dest='generate_url_mapping',
+        action='store',
+        required=False,
+        type=bool,
+        help=("Enable generation of URL mapping file (id -> url)")
+    )
     args = parser.parse_args()
     memory_limit(args.memory_limit)
     try:

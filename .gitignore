@@ -10,3 +10,4 @@ venv
 corpus*
 subindexes
 index.out
+urlmapping
