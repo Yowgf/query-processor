@@ -1,4 +1,7 @@
+import os
+
 from common.log import log
+from .url_mapping import skip_url_mapping
 
 logger = log.logger()
 
@@ -69,21 +72,15 @@ def write_index(index, outfpath, docid_offset):
             outf.write("\n")
     logger.info(f"Successfully wrote index to '{outfpath}'")
 
-def merge_indexes(this, other):
-    logger.info(f"Merging indexes. Size of this: {len(this)}. "+
-                f"Size of other: {len(other)}")
-
-    merged_index = this
-    for word in other:
-        if word in this:
-            this[word] = sorted(this[word] + other[word])
-        else:
-            this[word] = other[word]
-
-    logger.info(f"Successfully merged indexes. Size of merged index: "+
-                f"{len(merged_index)}")
-
-    return merged_index
+def move_index(infpath, outfpath, max_read_chars):
+    with open(infpath, "r") as inf:
+        with open(outfpath, "a") as outf:
+            while True:
+                s = inf.read(max_read_chars)
+                if len(s) == 0:
+                    break
+                outf.write(s)
+    os.remove(infpath)
 
 def is_useful_warcio_record(record):
     return (record.rec_type == 'response' and

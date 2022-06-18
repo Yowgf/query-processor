@@ -13,11 +13,15 @@ import nltk
 from .parser import PlaintextParser
 from .statistics import Statistics
 from .subindex import Subindex
-from .utils import read_index
-from .utils import write_index
-from .utils import merge_indexes
-from .utils import is_useful_warcio_record
-from .utils import get_warcio_record_url
+from .utils import (read_index,
+                    write_index,
+                    move_index,
+                    is_useful_warcio_record,
+                    get_warcio_record_url)
+from .url_mapping import (write_url_mapping_begin,
+                          write_url_mapping_end,
+                          write_url_mapping,
+                          skip_url_mapping)
 from common.log import log
 from common.memory.defs import MEGABYTE
 from common.memory.limit import memory_limit
@@ -26,21 +30,6 @@ from common.utils.utils import truncate_file
 from common.utils.utils import truncate_dir
 
 logger = log.logger()
-
-# TODOs:
-#
-# - Include printed information according to specification.
-#
-# - Log the file associated with each subindex, as well as the limit 12_000, so
-# - that it is possible to trace back the documents that contain some word with
-# - the final index.
-#
-# - test merging algorithm by letting it run for a while, and then over
-#   night. If it is successful, we should have our final index at hands!
-#
-# - if possible and necessary, parallelize with pipeline
-#
-################################################################################
 
 class Indexer:
     _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '/', '\\']) # '»',
@@ -51,7 +40,6 @@ class Indexer:
         self._corpus = config.corpus
         self._memory_limit = config.memory_limit
         self._output_file = config.output_file
-        self._generate_url_mapping = config.generate_url_mapping
 
         self._corpus_files = None
         self._index: Mapping[str, List[Tuple[int, int]]] = {}
@@ -84,9 +72,8 @@ class Indexer:
     def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
         truncate_file(self._output_file)
-        truncate_dir(self._subindexes_dir)
-        if self._generate_url_mapping:
-            truncate_dir(self._urlmapping_dir)
+        #truncate_dir(self._subindexes_dir)
+        #truncate_dir(self._urlmapping_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
@@ -120,7 +107,7 @@ class Indexer:
         )
 
         self._bytes_per_warcio_record = 16384
-        self._max_read_bytes_warcio = int(
+        self._max_read_bytes = int(
             (self._memory_limit / 1024) ** 2 * (
                 self._bytes_per_warcio_record * 8
             )
@@ -157,46 +144,46 @@ class Indexer:
     def run(self):
         before = datetime.now()
 
-        with concurrent.futures.ProcessPoolExecutor(
-                max_workers=self._max_num_process
-        ) as executor:
-            results = []
+        # with concurrent.futures.ProcessPoolExecutor(
+        #         max_workers=self._max_num_process
+        # ) as executor:
+        #     results = []
 
-            subindexes = self._subindexes
+        #     subindexes = self._subindexes
 
-            while True:
-                self._submit_jobs(executor, results, subindexes)
-                subindexes = []
+        #     while True:
+        #         self._submit_jobs(executor, results, subindexes)
+        #         subindexes = []
 
-                completed, not_completed = concurrent.futures.wait(
-                    results,
-                    timeout=5,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                results = list(not_completed)
-                if len(results) == 0:
-                    logger.info("Stopping indexer: no jobs left.")
-                    break
+        #         completed, not_completed = concurrent.futures.wait(
+        #             results,
+        #             timeout=5,
+        #             return_when=concurrent.futures.FIRST_COMPLETED,
+        #         )
+        #         results = list(not_completed)
+        #         if len(results) == 0:
+        #             logger.info("Stopping indexer: no jobs left.")
+        #             break
 
-                for future in completed:
-                    subindex = self._process_complete_job(future)
-                    if subindex != None:
-                        subindexes.append(subindex)
+        #         for future in completed:
+        #             subindex = self._process_complete_job(future)
+        #             if subindex != None:
+        #                 subindexes.append(subindex)
 
-        try:
-            del executor
-            gc.collect()        
-        except Exception as e:
-            logger.info(f"Error cleaning up memory from indexes production: {e}",
-                        exc_info=True)
+        # try:
+        #     del executor
+        #     gc.collect()        
+        # except Exception as e:
+        #     logger.info(f"Error cleaning up memory from indexes production: {e}",
+        #                 exc_info=True)
 
+        self._merge_url_mappings()
         self._merge_index()
 
         elapsed_secs = (datetime.now() - before).seconds
 
         statistics = self._gather_statistics()
         statistics.set_elapsed_time(elapsed_secs)
-
         print(statistics.to_json())
 
         self._cleanup()
@@ -215,7 +202,8 @@ class Indexer:
 
     def _cleanup(self):
         try:
-            os.rmdir(self._subindexes_dir)
+            shutil.rmtree(self._subindexes_dir)
+            shutil.rmtree(self._urlmapping_dir)
         except FileNotFoundError:
             pass
 
@@ -228,7 +216,7 @@ class Indexer:
         list_sizes = []
         avg_list_size = 0
 
-        checkpoint = 0
+        checkpoint = skip_url_mapping(self._output_file)
         while checkpoint != None:
             index, checkpoint = read_index(
                 self._output_file, checkpoint, self._max_read_chars_subindex)
@@ -240,7 +228,10 @@ class Indexer:
             del index
             gc.collect()
 
-        avg_list_size = round(sum(list_sizes) / len(list_sizes), 1)
+        if len(list_sizes) == 0:
+            avg_list_size = 0
+        else:
+            avg_list_size = round(sum(list_sizes) / len(list_sizes), 1)
 
         statistics = Statistics()
         statistics.set_index_size(index_size)
@@ -312,7 +303,7 @@ class Indexer:
                 if stream.tell() < old_checkpoint:
                     continue
                 if (stream.tell() - old_checkpoint >=
-                    self._max_read_bytes_warcio
+                    self._max_read_bytes
                 ):
                     parsed_whole_file = False
                     break
@@ -393,17 +384,14 @@ class Indexer:
         logger.info(f"({pid}) Indexing docs")
         log_memory_usage(logger)
 
-        if self._generate_url_mapping:
-            urlmapping_fpath = (f"{self._urlmapping_dir}/"+
-                                f"{subindex.id}_{subindex.docid}_"+
-                                f"{self._output_file}")
-            url_mapping = {}
-
+        urlmapping_fpath = (f"{self._urlmapping_dir}/"+
+                            f"{subindex.id}_{subindex.docid}_"+
+                            f"{self._output_file}")
         index = {}
+        url_mapping = {}
         docid = subindex.docid
         for doc in preprocessed_docs:
-            if self._generate_url_mapping:
-                url_mapping[docid + subindex.docid_offset] = doc
+            url_mapping[docid + subindex.docid_offset] = doc
 
             word_freq = preprocessed_docs[doc]
             for word in word_freq:
@@ -413,11 +401,7 @@ class Indexer:
                 index[word].append((docid, freq))
             docid += 1
 
-        if self._generate_url_mapping:
-            with open(urlmapping_fpath, "w") as f:
-                for url in url_mapping:
-                    if url != ' ':
-                        f.write(f"{url_mapping[url]} {url} ")
+        write_url_mapping(url_mapping, urlmapping_fpath)
 
         logger.info(f"({pid}) Successfully indexed docs")
         logger.debug(f"({pid}) Index result: {index}")
@@ -437,6 +421,45 @@ class Indexer:
         logger.info(f"({pid}) Successfully flushed index to path '{outfpath}'")
         log_memory_usage(logger)
 
+    def _merge_url_mappings(self):
+        logger.info(f"Merging URL mapping from dir '{self._urlmapping_dir}' to "+
+                    f"file '{self._output_file}'")
+        log_memory_usage(logger)
+
+        write_url_mapping_begin(self._output_file)
+
+        fpaths = glob.glob(f"{self._urlmapping_dir}/*")
+        if len(fpaths) == 0:
+            write_url_mapping_end(self._output_file)
+            return
+
+        for infpath in fpaths:
+            url_mapping = {}
+            with open(infpath, "r") as f:
+                while True:
+                    s = ""
+                    while len(s) < self._max_read_chars_subindex:
+                        newline = f.readline()
+                        if len(newline) == 0:
+                            break
+                        s += newline
+                    if s == "":
+                        break
+
+                    docid_urls = s.rstrip().split("\n")
+                    logger.info(f"Len of docid_urls: {len(docid_urls)}")
+                    for s in docid_urls:
+                        docid_url = s.split(" ")
+                        url_mapping[docid_url[0]] = docid_url[1]
+
+            write_url_mapping(url_mapping, self._output_file)
+
+        write_url_mapping_end(self._output_file)
+
+        logger.info(f"Successfully merged URL mapping from dir "+
+                    f"'{self._urlmapping_dir}' to file '{self._output_file}'")
+        log_memory_usage(logger)
+
     def _merge_index(self):
         logger.info(f"Merging index from dir '{self._subindexes_dir}' to file "+
                     f"'{self._output_file}'")
@@ -444,9 +467,6 @@ class Indexer:
 
         fpaths = glob.glob(f"{self._subindexes_dir}/*")
         if len(fpaths) == 0:
-            return
-        if len(fpaths) == 1:
-            shutil.move(fpaths.pop(), self._output_file)
             return
 
         while len(fpaths) > 1:
@@ -549,7 +569,7 @@ class Indexer:
             fpaths.append(index2_fpath)
 
         log_memory_usage(logger)
-        shutil.move(fpaths.pop(), self._output_file)
+        move_index(fpaths.pop(), self._output_file, self._max_read_chars_subindex*4)
 
         logger.info(f"Successfully merged index from dir '{self._subindexes_dir}'"+
                     f" to file '{self._output_file}'")
