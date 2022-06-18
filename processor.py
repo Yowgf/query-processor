@@ -63,7 +63,7 @@ def main():
         sys.exit(1)
     except Exception as e:
         logger.critical(f"Encountered fatal error: "+
-                     "{e}", exc_info=True)
+                        f"{e}", exc_info=True)
 
 if __name__ == "__main__":
     main()

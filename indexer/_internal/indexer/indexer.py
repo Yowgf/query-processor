@@ -13,8 +13,7 @@ import nltk
 from .parser import PlaintextParser
 from .statistics import Statistics
 from .subindex import Subindex
-from .utils import (read_index,
-                    write_index,
+from .utils import (write_index,
                     move_index,
                     is_useful_warcio_record,
                     get_warcio_record_url)
@@ -26,8 +25,9 @@ from common.log import log
 from common.memory.defs import MEGABYTE
 from common.memory.limit import memory_limit
 from common.memory.tracker import log_memory_usage
-from common.utils.utils import truncate_file
-from common.utils.utils import truncate_dir
+from common.utils.utils import (truncate_file,
+                                truncate_dir)
+from common.utils.index import read_index
 from common.preprocessing.normalize import normalize_word
 
 logger = log.logger()

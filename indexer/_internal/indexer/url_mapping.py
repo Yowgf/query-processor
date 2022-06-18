@@ -1,9 +1,7 @@
 from common.log import log
+from common.utils.url_mapping import (BEGIN_URL_MAPPING, END_URL_MAPPING)
 
 logger = log.logger()
-
-BEGIN_URL_MAPPING = "-----BEGIN URL MAPPING-----\n"
-END_URL_MAPPING   = "-----END URL MAPPING-----\n"
 
 def write_url_mapping_begin(outfpath):
     with open(outfpath, "a") as f:
