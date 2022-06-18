@@ -10,7 +10,7 @@ NUM_DOCS_KEY = "num_docs"
 class IndexMetadata:
     def __init__(self, metadata):
         logger.info(f"Initializing index metadata: {metadata}")
-        self.num_docs = metadata[NUM_DOCS_KEY]
+        self.num_docs = int(metadata[NUM_DOCS_KEY])
 
 def read_index_metadata(infpath, checkpoint):
     metadata = {}

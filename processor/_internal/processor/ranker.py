@@ -1,12 +1,19 @@
+from math import log2
+
 from common.log import log
 from common.memory.defs import MEGABYTE
 from common.utils.index import (read_index,
                                 read_index_metadata)
 from common.utils.url_mapping import read_url_mapping
+from common.preprocessing.normalize import tokenize_and_normalize
+from .utils import subindex_with_words
+from .score_heap import ScoreHeap
 
 logger = log.logger()
 
 MAX_READ_CHARS = 256 * MEGABYTE
+
+NUM_RESULTS = 10
 
 class TFIDF:
     def __init__(self, index_fpath: str):
@@ -41,9 +48,55 @@ class TFIDF:
     def rank(self, query: str):
         logger.info(f"Ranking query: '{query}'")
 
-        
+        tokens = tokenize_and_normalize(query)
+
+        subindex = subindex_with_words(self._index_fpath, self._checkpoint, tokens)
+
+        scores = ScoreHeap()
+        for word in subindex:
+            postings = subindex[word]
+            new_scores = self._score(word, postings)
+            for docid in new_scores:
+                scores.push(docid, new_scores[docid])
+
+        results = []
+        for _ in range(NUM_RESULTS):
+            docid, score = scores.pop()
+            while True:
+                new_docid, new_score = scores.pop()
+                if new_docid != docid:
+                    # Put back
+                    scores.push(new_docid, new_score)
+                    break
+                score += new_score
+
+            results.append({
+                "URL": self._url_mapping[docid],
+                "Score": score,
+            })
+
+        result_json = {}
+        result_json["Query"] = query
+        result_json["Results"] = results
+
+        print(result_json)
 
         logger.info(f"Successfully ranked query: '{query}'")
+
+    def _score(self, word, postings):
+        scores = {}
+
+        for posting in postings:
+            docid, weight = posting
+            score = self._tfidf(weight, len(postings))
+            scores[docid] = score
+
+        return scores
+
+    def _tfidf(self, freq, len_postings):
+        tf = freq
+        idf = log2((self._num_docs + 1) / len_postings)
+        return tf * idf
 
 class BM25:
     def __init__(self, index_fpath: str):
@@ -51,9 +104,7 @@ class BM25:
 
     def init(self):
         logger.info("Initializing ranker")
-
         logger.info("Successfully initialized ranker")
-
 
     def train(self):
         logger.info(f"Training ranker from path '{self._index_fpath}'")
@@ -61,9 +112,6 @@ class BM25:
 
     def rank(self, query: str):
         logger.info(f"Ranking query: '{query}'")
-
-        
-
         logger.info(f"Successfully ranked query: '{query}'")
 
 def new_ranker(ranker_type, index_fpath):

@@ -8,7 +8,6 @@ from threading import get_ident
 from typing import Mapping, List, Tuple
 
 from warcio.archiveiterator import ArchiveIterator
-import nltk
 
 from .parser import PlaintextParser
 from .statistics import Statistics
@@ -17,10 +16,14 @@ from .utils import (write_index,
                     move_index,
                     is_useful_warcio_record,
                     get_warcio_record_url)
+from .index_metadata import (write_index_metadata_begin,
+                             write_index_metadata_end,
+                             skip_index_metadata)
 from .url_mapping import (write_url_mapping_begin,
                           write_url_mapping_end,
                           write_url_mapping,
                           skip_url_mapping)
+from common.utils.index import NUM_DOCS_KEY
 from common.log import log
 from common.memory.defs import MEGABYTE
 from common.memory.limit import memory_limit
@@ -28,7 +31,8 @@ from common.memory.tracker import log_memory_usage
 from common.utils.utils import (truncate_file,
                                 truncate_dir)
 from common.utils.index import read_index
-from common.preprocessing.normalize import normalize_word
+from common.preprocessing.normalize import (tokenize,
+                                            normalize_word)
 
 logger = log.logger()
 
@@ -48,6 +52,8 @@ class Indexer:
         # Dict filepath -> URL where we left off
         self._file_checkpoint = {}
 
+        self._max_docid = 0
+
     # init is separated from __init__ because it might throw exceptions.
     def init(self):
         # The order in which the sub-init functions are called is very
@@ -55,7 +61,6 @@ class Indexer:
         logger.info("Initializing indexer.")
         self._init_files()
         self._init_limits()
-        self._init_nltk()
         self._init_subindexes()
         logger.info("Successfully initialized indexer.")
 
@@ -111,10 +116,6 @@ class Indexer:
         logger.info(f"Limit memory_per_subprocess={self._memory_per_subprocess}")
         logger.info(f"Limit num_subindexes={self._num_subindexes}")
 
-    def _init_nltk(self):
-        nltk.download('punkt', quiet=True)
-        nltk.download('stopwords', quiet=True)
-
     # _init_subindexes assumes that the corpus files have already been located.
     def _init_subindexes(self):
         self._subindexes = [Subindex(id) for id in range(self._num_subindexes)]
@@ -163,6 +164,8 @@ class Indexer:
                     subindex = self._process_complete_job(future)
                     if subindex != None:
                         subindexes.append(subindex)
+                        if subindex.docid > self._max_docid:
+                            self._max_docid = subindex.docid
 
         try:
             del executor
@@ -172,6 +175,7 @@ class Indexer:
                         exc_info=True)
 
         self._merge_url_mappings()
+        self._append_index_metadata()
         self._merge_index()
 
         elapsed_secs = (datetime.now() - before).seconds
@@ -210,7 +214,8 @@ class Indexer:
         list_sizes = []
         avg_list_size = 0
 
-        checkpoint = skip_url_mapping(self._output_file)
+        checkpoint = skip_url_mapping(self._output_file, 0)
+        checkpoint = skip_index_metadata(self._output_file, checkpoint)
         while checkpoint != None:
             index, checkpoint = read_index(
                 self._output_file, checkpoint, self._max_read_chars_subindex)
@@ -322,7 +327,7 @@ class Indexer:
         log_memory_usage(logger)
 
         for doc in docs:
-            docs[doc] = nltk.word_tokenize(docs[doc])
+            docs[doc] = tokenize(docs[doc])
 
         logger.info(f"({pid}) Successfully tokenized docs")
         logger.debug(f"({pid}) Tokenized docs len: {len(docs)}")
@@ -437,6 +442,18 @@ class Indexer:
         logger.info(f"Successfully merged URL mapping from dir "+
                     f"'{self._urlmapping_dir}' to file '{self._output_file}'")
         log_memory_usage(logger)
+
+    def _append_index_metadata(self):
+        logger.info(f"Appending index metadata to '{self._output_file}'")
+
+        write_index_metadata_begin(self._output_file)
+
+        with open(self._output_file, "a") as f:
+            f.write(f"{NUM_DOCS_KEY} {self._max_docid}\n")
+
+        write_index_metadata_end(self._output_file)
+
+        logger.info(f"Successfully appended index metadata to '{self._output_file}'")
 
     def _merge_index(self):
         logger.info(f"Merging index from dir '{self._subindexes_dir}' to file "+

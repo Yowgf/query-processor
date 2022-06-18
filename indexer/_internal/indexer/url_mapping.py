@@ -18,11 +18,16 @@ def write_url_mapping(url_mapping, outfpath):
             f.write(f"{docid} {url_mapping[docid]}\n")
     logger.info(f"Successfully wrote URL mapping of size {len(url_mapping)}")
 
-def skip_url_mapping(infpath):
+def skip_url_mapping(infpath, checkpoint):
     logger.info(f"Skipping URL mapping from '{infpath}'")
 
-    checkpoint = None
     with open(infpath, "r") as f:
+        f.seek(checkpoint)
+
+        first_line = f.readline()
+        print(first_line)
+        assert first_line == BEGIN_URL_MAPPING, first_line
+
         line = None
         while line != '' and line != END_URL_MAPPING:
             line = f.readline()

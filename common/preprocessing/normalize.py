@@ -13,6 +13,9 @@ STEMMERS = [nltk.stem.snowball.PortugueseStemmer(),
 MIN_CHARS_WORD = 3
 MAX_CHARS_WORD = 20
 
+def tokenize(s):
+    return nltk.word_tokenize(s)
+
 def normalize_word(word):
     # Stopword removal
     if word in STOPWORDS:
@@ -32,3 +35,14 @@ def normalize_word(word):
         normalized_word = normalized_word[:20]
 
     return normalized_word
+
+def tokenize_and_normalize(s):
+    tokens = tokenize(s)
+
+    normalized_tokens = []
+    for token in tokens:
+        normalized_token = normalize_word(token)
+        if normalized_token != None:
+            normalized_tokens.append(normalized_token)
+
+    return normalized_tokens

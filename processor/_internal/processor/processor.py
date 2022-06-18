@@ -20,8 +20,6 @@ class Processor:
     def run(self):
         logger.info("Running query processor")
 
-        self._ranker.train()
-
         for query in self._queries:
             print(self._ranker.rank(query))
 

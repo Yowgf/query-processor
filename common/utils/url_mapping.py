@@ -15,7 +15,7 @@ def read_url_mapping(fpath, checkpoint):
         lines = s.rstrip().split("\n")
         for line in lines:
             docid_url = line.split(" ")
-            url_mapping[docid_url[0]] = docid_url[1]
+            url_mapping[int(docid_url[0])] = docid_url[1]
 
         checkpoint = f.tell()
 
