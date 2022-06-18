@@ -28,12 +28,11 @@ from common.memory.limit import memory_limit
 from common.memory.tracker import log_memory_usage
 from common.utils.utils import truncate_file
 from common.utils.utils import truncate_dir
+from common.preprocessing.normalize import normalize_word
 
 logger = log.logger()
 
 class Indexer:
-    _punctuations = set([',', '.', '[', ']', '(', ')', '{', '}', '/', '\\']) # '»',
-
     _estimate_max_memory_consumed_per_doc = 0.4 # MB
 
     def __init__(self, config):
@@ -54,26 +53,17 @@ class Indexer:
         # The order in which the sub-init functions are called is very
         # important.
         logger.info("Initializing indexer.")
-        self._init_nltk()
         self._init_files()
         self._init_limits()
+        self._init_nltk()
         self._init_subindexes()
         logger.info("Successfully initialized indexer.")
-
-    def _init_nltk(self):
-        nltk.download('punkt', quiet=True)
-        nltk.download('stopwords', quiet=True)
-        self._stemmers = [nltk.stem.snowball.PortugueseStemmer(),
-                          #nltk.stem.snowball.EnglishStemmer(),
-        ]
-        self._stopwords = set(nltk.corpus.stopwords.words('portuguese') +
-                              nltk.corpus.stopwords.words('english'))
 
     def _init_files(self):
         self._corpus_files = glob.glob(self._corpus + "/*")
         truncate_file(self._output_file)
-        #truncate_dir(self._subindexes_dir)
-        #truncate_dir(self._urlmapping_dir)
+        truncate_dir(self._subindexes_dir)
+        truncate_dir(self._urlmapping_dir)
 
     # _init_limits assumes that the corpus files have already been located.
     def _init_limits(self):
@@ -121,6 +111,10 @@ class Indexer:
         logger.info(f"Limit memory_per_subprocess={self._memory_per_subprocess}")
         logger.info(f"Limit num_subindexes={self._num_subindexes}")
 
+    def _init_nltk(self):
+        nltk.download('punkt', quiet=True)
+        nltk.download('stopwords', quiet=True)
+
     # _init_subindexes assumes that the corpus files have already been located.
     def _init_subindexes(self):
         self._subindexes = [Subindex(id) for id in range(self._num_subindexes)]
@@ -144,38 +138,38 @@ class Indexer:
     def run(self):
         before = datetime.now()
 
-        # with concurrent.futures.ProcessPoolExecutor(
-        #         max_workers=self._max_num_process
-        # ) as executor:
-        #     results = []
+        with concurrent.futures.ProcessPoolExecutor(
+                max_workers=self._max_num_process
+        ) as executor:
+            results = []
 
-        #     subindexes = self._subindexes
+            subindexes = self._subindexes
 
-        #     while True:
-        #         self._submit_jobs(executor, results, subindexes)
-        #         subindexes = []
+            while True:
+                self._submit_jobs(executor, results, subindexes)
+                subindexes = []
 
-        #         completed, not_completed = concurrent.futures.wait(
-        #             results,
-        #             timeout=5,
-        #             return_when=concurrent.futures.FIRST_COMPLETED,
-        #         )
-        #         results = list(not_completed)
-        #         if len(results) == 0:
-        #             logger.info("Stopping indexer: no jobs left.")
-        #             break
+                completed, not_completed = concurrent.futures.wait(
+                    results,
+                    timeout=5,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                results = list(not_completed)
+                if len(results) == 0:
+                    logger.info("Stopping indexer: no jobs left.")
+                    break
 
-        #         for future in completed:
-        #             subindex = self._process_complete_job(future)
-        #             if subindex != None:
-        #                 subindexes.append(subindex)
+                for future in completed:
+                    subindex = self._process_complete_job(future)
+                    if subindex != None:
+                        subindexes.append(subindex)
 
-        # try:
-        #     del executor
-        #     gc.collect()        
-        # except Exception as e:
-        #     logger.info(f"Error cleaning up memory from indexes production: {e}",
-        #                 exc_info=True)
+        try:
+            del executor
+            gc.collect()        
+        except Exception as e:
+            logger.info(f"Error cleaning up memory from indexes production: {e}",
+                        exc_info=True)
 
         self._merge_url_mappings()
         self._merge_index()
@@ -347,25 +341,9 @@ class Indexer:
             # map word -> freq
             processed_word_freq = {}
             for word in doc_words:
-                # Stopword removal
-                if word in self._stopwords:
+                normalized_word = normalize_word(word)
+                if normalized_word == None:
                     continue
-
-                # Malformed words removal.
-                # Examples: '', ',123', '.hello', '(me'.
-                if word == '' or word[0] in self._punctuations:
-                    continue
-
-                # Normalization
-                normalized_word = word
-                for stemmer in self._stemmers:
-                    normalized_word = stemmer.stem(normalized_word)
-                # Min 3 chars
-                if len(normalized_word) < 3:
-                    continue
-                # Max 20 chars
-                if len(normalized_word) > 20:
-                    normalized_word = normalized_word[:20]
 
                 # Increment frequency
                 if normalized_word not in processed_word_freq:
