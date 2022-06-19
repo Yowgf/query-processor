@@ -1,5 +1,5 @@
 from common.log import log
-from .ranker import new_ranker
+from .ranker import Ranker
 
 logger = log.logger()
 
@@ -7,7 +7,7 @@ class Processor:
     def __init__(self, config):
         self._index_file = config.index_file
         self._queries_file = config.queries
-        self._ranker = new_ranker(config.ranker, self._index_file)
+        self._ranker = Ranker(config.ranker, self._index_file)
 
     def init(self):
         logger.info(f"Initializing query processor")

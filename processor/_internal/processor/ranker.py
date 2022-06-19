@@ -1,5 +1,5 @@
 import json
-from math import log2
+from math import log as natural_log
 
 from common.log import log
 from common.memory.defs import MEGABYTE
@@ -28,10 +28,22 @@ NUM_RESULTS = 10
 # 1- use DAAT instead of TAAT
 #
 
-class TFIDF:
-    def __init__(self, index_fpath: str):
+RANKER_TYPE_TFIDF = "TFIDF"
+RANKER_TYPE_BM25  = "BM25"
+
+class Ranker:
+    def __init__(self, ranker_type: str, index_fpath: str):
         self._index_fpath = index_fpath
         self._checkpoint = 0
+
+        if ranker_type not in [RANKER_TYPE_TFIDF, RANKER_TYPE_BM25]:
+            raise ValueError(f"Invalid ranker type {ranker_type}")
+        self._ranker_type = ranker_type
+
+        # k1 in [1.2, 2.0]
+        self._bm25_k1 = 1.5
+        self._bm25_b = 0.75
+        
 
     def init(self):
         logger.info("Initializing ranker")
@@ -72,7 +84,7 @@ class TFIDF:
 
             results.append({
                 "URL": self._url_mapping.get_url(docid),
-                "Score": score,
+                "Score": round(score, 1),
             })
 
         result_json = {}
@@ -88,6 +100,8 @@ class TFIDF:
         logger.info(f"Scoring tokens {tokens} with subindex of length: "+
                     f"{len(subindex)}")
 
+        # DAAT adapted from 2022-01 Information Retrieval class slides
+        #
         scores = ScoreHeap()
         posting_idxs = {word: 0 for word in subindex}
         for target_docid in range(self._max_docid):
@@ -105,7 +119,10 @@ class TFIDF:
                         # The inverted list is ordered by docid
                         break
                     elif docid == target_docid:
-                        score += self._tfidf(weight, len(subindex[term]))
+                        if self._ranker_type == RANKER_TYPE_TFIDF:
+                            score += self._tfidf(docid, weight, len(subindex[term]))
+                        elif self._ranker_type == RANKER_TYPE_BM25:
+                            score += self._bm25(docid, weight, len(subindex[term]))
                         scores.push(docid, score)
                         posting_idx += 1
                         break
@@ -116,38 +133,25 @@ class TFIDF:
             if score != 0:
                 scores.push(docid, score)
 
-        logger.info(f"Successfully scored {tokens} with subindex {subindex}. "+
-                    f"Scores length: {len(scores)}")
+        logger.info(f"Successfully scored {tokens} with subindex len "+
+                    "{len(subindex)}. Scores length: {len(scores)}")
 
         return scores
 
-    def _tfidf(self, freq, len_postings):
-        tf = freq
-        idf = log2((self._num_docs + 1) / len_postings)
-        #logger.info(f"TFIDF for {freq}, {len_postings}: {tf}, {idf}")
-        return tf * idf
+    def _tf(self, docid, freq):
+        return freq / self._url_mapping.get_doc_len(docid)
 
-class BM25:
-    def __init__(self, index_fpath: str):
-        self._index_fpath = index_fpath
+    def _idf(self, len_postings):
+        return natural_log((self._num_docs - len_postings + 0.5) / 
+                           (len_postings + 0.5) + 1)
 
-    def init(self):
-        logger.info("Initializing ranker")
-        logger.info("Successfully initialized ranker")
+    def _tfidf(self, docid, freq, len_postings):
+        return self._tf(docid, freq) * self._idf(len_postings)
 
-    def train(self):
-        logger.info(f"Training ranker from path '{self._index_fpath}'")
-        logger.info(f"Successfully trained ranker from path '{self._index_fpath}'")
-
-    def rank(self, query: str):
-        logger.info(f"Ranking query: '{query}'")
-        logger.info(f"Successfully ranked query: '{query}'")
-
-def new_ranker(ranker_type, index_fpath):
-    logger.info(f"Creating ranker of type {ranker_type}")
-    if ranker_type == "TFIDF":
-        return TFIDF(index_fpath)
-    elif ranker_type == "BM25":
-        return BM25(index_fpath)
-    else:
-        raise ValueError(f"Invalid ranker type {ranker_type}")
+    def _bm25(self, docid, freq, len_postings):
+        return self._idf(len_postings) * (
+            (freq * (self._bm25_k1 + 1)) /
+            freq + self._bm25_k1 * (1 - self._bm25_b + self._bm25_b *
+                                    self._url_mapping.get_doc_len(docid) /
+                                    self._avg_doc_len)
+        )
