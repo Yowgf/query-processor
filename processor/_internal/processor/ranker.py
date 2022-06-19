@@ -22,7 +22,10 @@ NUM_RESULTS = 10
 # - Ranker.__init__ will set ranker._score = tfidf, bm25
 #
 #
-# TODO: use DAAT instead of TAAT
+
+# Necessary TODOs:
+#
+# 1- use DAAT instead of TAAT
 #
 
 class TFIDF:
@@ -40,34 +43,18 @@ class TFIDF:
 
         self._url_mapping = url_mapping
         self._num_docs = index_metadata.num_docs
+        self._max_docid = index_metadata.max_docid
+        self._avg_doc_len = index_metadata.avg_doc_len
         self._checkpoint = checkpoint
 
         logger.info("Successfully initialized ranker")
-
-    def train(self):
-        logger.info(f"Training ranker from path '{self._index_fpath}'")
-
-        checkpoint = self._checkpoint
-        while checkpoint != None:
-            index, checkpoint = read_index(self._index_fpath, checkpoint,
-                                           MAX_READ_CHARS)
-            logger.info(f"Read index. Length: {len(index)}")
-
-        logger.info(f"Successfully trained ranker from path '{self._index_fpath}'")
 
     def rank(self, query: str):
         logger.info(f"Ranking query: '{query}'")
 
         tokens = tokenize_and_normalize(query)
-
         subindex = subindex_with_words(self._index_fpath, self._checkpoint, tokens)
-
-        scores = ScoreHeap()
-        for word in subindex:
-            postings = subindex[word]
-            new_scores = self._score(word, postings)
-            for docid in new_scores:
-                scores.push(docid, new_scores[docid])
+        scores = self._score(subindex, tokens)
 
         results = []
         for _ in range(NUM_RESULTS):
@@ -84,7 +71,7 @@ class TFIDF:
                 score += new_score
 
             results.append({
-                "URL": self._url_mapping[docid],
+                "URL": self._url_mapping.get_url(docid),
                 "Score": score,
             })
 
@@ -92,17 +79,45 @@ class TFIDF:
         result_json["Query"] = query
         result_json["Results"] = results
 
-        print(json.dumps(result_json))
-
         logger.info(f"Successfully ranked query: '{query}'")
 
-    def _score(self, word, postings):
-        scores = {}
+        return json.dumps(result_json, ensure_ascii=False)
 
-        for posting in postings:
-            docid, weight = posting
-            score = self._tfidf(weight, len(postings))
-            scores[docid] = score
+    # Scores documents in a Document at a time (DAAT) fashion.
+    def _score(self, subindex, tokens):
+        logger.info(f"Scoring tokens {tokens} with subindex of length: "+
+                    f"{len(subindex)}")
+
+        scores = ScoreHeap()
+        posting_idxs = {word: 0 for word in subindex}
+        for target_docid in range(self._max_docid):
+            if target_docid % 10000 == 0:
+                logger.info(f"Scoring document with ID {target_docid}")
+
+            score = 0
+            for term in tokens:
+                posting_idx = posting_idxs[term]
+
+                while posting_idx < len(subindex[term]):
+                    docid, weight = subindex[term][posting_idx]
+
+                    if docid > target_docid:
+                        # The inverted list is ordered by docid
+                        break
+                    elif docid == target_docid:
+                        score += self._tfidf(weight, len(subindex[term]))
+                        scores.push(docid, score)
+                        posting_idx += 1
+                        break
+                    posting_idx += 1
+
+                posting_idxs[term] = posting_idx
+
+            if score != 0:
+                scores.push(docid, score)
+
+        logger.info(f"Successfully scored {tokens} with subindex {subindex}. "+
+                    f"Scores length: {len(scores)}")
 
         return scores
 

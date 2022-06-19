@@ -16,7 +16,7 @@ def write_index(index, outfpath, docid_offset):
             outf.write("\n")
     logger.info(f"Successfully wrote index to '{outfpath}'")
 
-def move_index(infpath, outfpath, max_read_chars):
+def move_file(infpath, outfpath, max_read_chars):
     logger.info(f"Moving index from '{infpath}' to '{outfpath}'")
     with open(infpath, "r") as inf:
         with open(outfpath, "a") as outf:

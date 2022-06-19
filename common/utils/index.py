@@ -5,12 +5,16 @@ logger = log.logger()
 BEGIN_INDEX_METADATA = "-----BEGIN INDEX METADATA-----\n"
 END_INDEX_METADATA   = "-----END INDEX METADATA-----\n"
 
-NUM_DOCS_KEY = "num_docs"
+NUM_DOCS_KEY    = "num_docs"
+MAX_DOCID_KEY = "max_docid"
+AVG_DOC_LEN_KEY = "avg_doc_len"
 
 class IndexMetadata:
     def __init__(self, metadata):
         logger.info(f"Initializing index metadata: {metadata}")
         self.num_docs = int(metadata[NUM_DOCS_KEY])
+        self.max_docid = int(metadata[MAX_DOCID_KEY])
+        self.avg_doc_len = float(metadata[AVG_DOC_LEN_KEY])
 
 def read_index_metadata(infpath, checkpoint):
     metadata = {}

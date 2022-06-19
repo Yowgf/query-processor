@@ -15,7 +15,10 @@ def write_url_mapping(url_mapping, outfpath):
     logger.info(f"Writing URL mapping of size {len(url_mapping)}")
     with open(outfpath, "a") as f:
         for docid in url_mapping:
-            f.write(f"{docid} {url_mapping[docid]}\n")
+            info = url_mapping[docid]
+            doclen = info[0]
+            url = info[1]
+            f.write(f"{docid} {doclen} {url}\n")
     logger.info(f"Successfully wrote URL mapping of size {len(url_mapping)}")
 
 def skip_url_mapping(infpath, checkpoint):

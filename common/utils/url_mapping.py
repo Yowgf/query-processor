@@ -1,6 +1,16 @@
 BEGIN_URL_MAPPING = "-----BEGIN URL MAPPING-----\n"
 END_URL_MAPPING   = "-----END URL MAPPING-----\n"
 
+class UrlMapping:
+    def __init__(self, url_mapping):
+        self._m = url_mapping
+
+    def get_doc_len(self, docid):
+        return self._m[docid][0]
+
+    def get_url(self, docid):
+        return self._m[docid][1]
+
 def read_url_mapping(fpath, checkpoint):
     url_mapping = {}
     with open(fpath, "r") as f:
@@ -14,9 +24,12 @@ def read_url_mapping(fpath, checkpoint):
             newline = f.readline()
         lines = s.rstrip().split("\n")
         for line in lines:
-            docid_url = line.split(" ")
-            url_mapping[int(docid_url[0])] = docid_url[1]
+            docid_values = line.split(" ")
+            docid = int(docid_values[0])
+            doc_len = docid_values[1]
+            url = docid_values[2]
+            url_mapping[docid] = (doc_len, url)
 
         checkpoint = f.tell()
 
-    return url_mapping, checkpoint
+    return UrlMapping(url_mapping), checkpoint

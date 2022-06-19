@@ -13,7 +13,7 @@ from .parser import PlaintextParser
 from .statistics import Statistics
 from .subindex import Subindex
 from .utils import (write_index,
-                    move_index,
+                    move_file,
                     is_useful_warcio_record,
                     get_warcio_record_url)
 from .index_metadata import (write_index_metadata_begin,
@@ -23,9 +23,12 @@ from .url_mapping import (write_url_mapping_begin,
                           write_url_mapping_end,
                           write_url_mapping,
                           skip_url_mapping)
-from common.utils.index import NUM_DOCS_KEY
+from common.utils.index import (NUM_DOCS_KEY,
+                                MAX_DOCID_KEY,
+                                AVG_DOC_LEN_KEY)
 from common.log import log
-from common.memory.defs import MEGABYTE
+from common.memory.defs import (MEGABYTE,
+                                MAX_DOCS_PER_FILE)
 from common.memory.limit import memory_limit
 from common.memory.tracker import log_memory_usage
 from common.utils.utils import (truncate_file,
@@ -53,6 +56,8 @@ class Indexer:
         self._file_checkpoint = {}
 
         self._num_docs = 0
+        self._max_docid = 0
+        self._sum_doc_lens = 0
 
     # init is separated from __init__ because it might throw exceptions.
     def init(self):
@@ -94,9 +99,6 @@ class Indexer:
             self._memory_limit / (self._max_num_process + 1)
         )
 
-        # No more than 12K docs per file
-        self._max_docs_in_file = 12_000
-
         self._max_read_chars_subindex = int(
             (self._memory_limit / 1024) ** 2 * 8 * MEGABYTE
         )
@@ -109,7 +111,6 @@ class Indexer:
         )
 
         # Print limits in alphabetical order.
-        logger.info(f"Limit max_docs_in_file={self._max_docs_in_file}")
         logger.info(f"Limit max_docs_per_process={self._max_docs_per_process}")
         logger.info(f"Limit max_num_process={self._max_num_process}")
         logger.info(f"Limit max_read_chars_subindex={self._max_read_chars_subindex}")
@@ -133,7 +134,7 @@ class Indexer:
         # Define the document offset of each subindex.
         num_files = 0
         for subindex in self._subindexes:
-            subindex.docid_offset = num_files * self._max_docs_in_file
+            subindex.docid_offset = num_files * MAX_DOCS_PER_FILE
             num_files += len(subindex)
 
     def run(self):
@@ -189,12 +190,16 @@ class Indexer:
             results.append(executor.submit(self._run, subindex))
 
     def _process_complete_job(self, future):
-        subindex, completed_subindex = future.result()
+        subindex, completed_subindex, sum_doc_lens = future.result()
+
+        self._sum_doc_lens += sum_doc_lens
 
         if not completed_subindex:
             return subindex
         else:
             self._num_docs += subindex.docid
+            if subindex.docid_offset + subindex.docid > self._max_docid:
+                self._max_docid = subindex.docid_offset + subindex.docid
             return None
 
     def _cleanup(self):
@@ -246,22 +251,28 @@ class Indexer:
         pid = os.getpid()
 
         old_docid = subindex.docid
+        sum_doc_lens = 0
         try:
             fpath, old_checkpoint = subindex.pop_file()
 
-            docs, completed, checkpoint = self._streamize(fpath, old_checkpoint, pid)
+            docs, doc_lens, completed, checkpoint = self._streamize(
+                fpath, old_checkpoint, pid)
+            for length in doc_lens.values():
+                sum_doc_lens += length
             tokenized_docs = self._tokenize(docs, pid)
             del docs
             preprocessed_docs = self._preprocess(tokenized_docs, pid)
             del tokenized_docs
             gc.collect()
-            index, new_docid = self._produce_index(subindex, preprocessed_docs, pid)
+            index, new_docid = self._produce_index(subindex, preprocessed_docs,
+                                                   doc_lens, pid)
             self._flush_index(subindex, index, pid)
             # Only increment subindex docid after really done with portion of
             # index.
             subindex.docid = new_docid
             del index
             gc.collect()
+
         except Exception as e:
             logger.error(f"({pid}) Received unexpected exception: "+
                          f"{e}. Returning immediately.", exc_info=True)
@@ -270,10 +281,10 @@ class Indexer:
                 # need to restore the previous state so that we can try again.
                 subindex.docid = old_docid
                 subindex.push_file(fpath, old_checkpoint)
-                return subindex, False
+                return subindex, False, 0
             except Exception as e:
                 logger.error(f"({pid}) Error pushing file to subindex: {e}.")
-                return subindex, False
+                return subindex, False, 0
 
         try:
             if not completed:
@@ -286,7 +297,7 @@ class Indexer:
             logger.info(f"({pid}) Completed subindex with id {subindex.id}")
             completed_subindex = True
 
-        return subindex, completed_subindex
+        return subindex, completed_subindex, sum_doc_lens
 
     def _streamize(self, fpath: str, old_checkpoint: int, pid="Unknown"):
         logger.info(f"({pid}) Streamizing doc for path '{fpath}', "+
@@ -294,6 +305,7 @@ class Indexer:
         log_memory_usage(logger)
 
         new_docs = {}
+        doc_lens = {}
         parsed_whole_file = True
         with open(fpath, 'rb') as stream:
 
@@ -308,9 +320,10 @@ class Indexer:
 
                 url = get_warcio_record_url(record)
                 text = record.content_stream().read()
-
                 normalized_text = PlaintextParser.normalize_text(text)
                 new_docs[url] = normalized_text
+
+                doc_lens[url] = len(normalized_text)
 
             new_checkpoint = stream.tell()
 
@@ -319,7 +332,7 @@ class Indexer:
                     f"{new_checkpoint - old_checkpoint}")
         log_memory_usage(logger)
 
-        return new_docs, parsed_whole_file, new_checkpoint
+        return new_docs, doc_lens, parsed_whole_file, new_checkpoint
 
     def _tokenize(self, docs, pid="Unknown") -> Mapping[str, List[str]]:
         logger.info(f"({pid}) Tokenizing docs")
@@ -362,7 +375,7 @@ class Indexer:
 
         return preprocessed_docs
 
-    def _produce_index(self, subindex, preprocessed_docs, pid="Unknown"):
+    def _produce_index(self, subindex, preprocessed_docs, doc_lens, pid="Unknown"):
         logger.info(f"({pid}) Indexing docs")
         log_memory_usage(logger)
 
@@ -372,10 +385,10 @@ class Indexer:
         index = {}
         url_mapping = {}
         docid = subindex.docid
-        for doc in preprocessed_docs:
-            url_mapping[docid + subindex.docid_offset] = doc
+        for url in preprocessed_docs:
+            url_mapping[docid + subindex.docid_offset] = (doc_lens[url], url)
 
-            word_freq = preprocessed_docs[doc]
+            word_freq = preprocessed_docs[url]
             for word in word_freq:
                 freq = word_freq[word]
                 if word not in index:
@@ -416,25 +429,7 @@ class Indexer:
             return
 
         for infpath in fpaths:
-            url_mapping = {}
-            with open(infpath, "r") as f:
-                while True:
-                    s = ""
-                    while len(s) < self._max_read_chars_subindex:
-                        newline = f.readline()
-                        if len(newline) == 0:
-                            break
-                        s += newline
-                    if s == "":
-                        break
-
-                    docid_urls = s.rstrip().split("\n")
-                    logger.info(f"Len of docid_urls: {len(docid_urls)}")
-                    for s in docid_urls:
-                        docid_url = s.split(" ")
-                        url_mapping[docid_url[0]] = docid_url[1]
-
-            write_url_mapping(url_mapping, self._output_file)
+            move_file(infpath, self._output_file, self._max_read_chars_subindex * 4)
 
         write_url_mapping_end(self._output_file)
 
@@ -447,8 +442,14 @@ class Indexer:
 
         write_index_metadata_begin(self._output_file)
 
+        num_docs = self._num_docs
+        max_docid = self._max_docid
+        avg_doc_len = self._sum_doc_lens / num_docs
+
         with open(self._output_file, "a") as f:
-            f.write(f"{NUM_DOCS_KEY} {self._num_docs}\n")
+            f.write(f"{NUM_DOCS_KEY} {num_docs}\n")
+            f.write(f"{MAX_DOCID_KEY} {max_docid}\n")
+            f.write(f"{AVG_DOC_LEN_KEY} {avg_doc_len}\n")
 
         write_index_metadata_end(self._output_file)
 
@@ -563,7 +564,7 @@ class Indexer:
             fpaths.append(index2_fpath)
 
         log_memory_usage(logger)
-        move_index(fpaths.pop(), self._output_file, self._max_read_chars_subindex*4)
+        move_file(fpaths.pop(), self._output_file, self._max_read_chars_subindex*4)
 
         logger.info(f"Successfully merged index from dir '{self._subindexes_dir}'"+
                     f" to file '{self._output_file}'")
