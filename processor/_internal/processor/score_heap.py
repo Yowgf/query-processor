@@ -8,8 +8,8 @@ class ScoreHeap:
         return len(self._l)
 
     def pop(self):
-        score, docid = heapq.heappop(self._l)
-        return docid, score
+        negscore, docid = heapq.heappop(self._l)
+        return docid, -negscore
 
     def push(self, docid, score):
-        return heapq.heappush(self._l, (score, docid))
+        return heapq.heappush(self._l, (-score, docid))

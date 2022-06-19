@@ -12,7 +12,7 @@ class Processor:
     def init(self):
         logger.info(f"Initializing query processor")
 
-        self._queries = open(self._queries_file, "r").read().split("\n")
+        self._queries = open(self._queries_file, "r").read().strip().split("\n")
         self._ranker.init()
 
         logger.info(f"Successfully initialized query processor")

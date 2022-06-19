@@ -52,7 +52,7 @@ class Indexer:
         # Dict filepath -> URL where we left off
         self._file_checkpoint = {}
 
-        self._max_docid = 0
+        self._num_docs = 0
 
     # init is separated from __init__ because it might throw exceptions.
     def init(self):
@@ -155,18 +155,16 @@ class Indexer:
                     timeout=5,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
-                results = list(not_completed)
-                if len(results) == 0:
-                    logger.info("Stopping indexer: no jobs left.")
-                    break
 
                 for future in completed:
                     subindex = self._process_complete_job(future)
                     if subindex != None:
                         subindexes.append(subindex)
-                        if subindex.docid > self._max_docid:
-                            self._max_docid = subindex.docid
 
+                results = list(not_completed)
+                if len(results) == 0:
+                    logger.info("Stopping indexer: no jobs left.")
+                    break
         try:
             del executor
             gc.collect()        
@@ -196,6 +194,7 @@ class Indexer:
         if not completed_subindex:
             return subindex
         else:
+            self._num_docs += subindex.docid
             return None
 
     def _cleanup(self):
@@ -449,7 +448,7 @@ class Indexer:
         write_index_metadata_begin(self._output_file)
 
         with open(self._output_file, "a") as f:
-            f.write(f"{NUM_DOCS_KEY} {self._max_docid}\n")
+            f.write(f"{NUM_DOCS_KEY} {self._num_docs}\n")
 
         write_index_metadata_end(self._output_file)
 

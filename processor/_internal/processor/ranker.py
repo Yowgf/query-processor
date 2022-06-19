@@ -1,3 +1,4 @@
+import json
 from math import log2
 
 from common.log import log
@@ -12,8 +13,17 @@ from .score_heap import ScoreHeap
 logger = log.logger()
 
 MAX_READ_CHARS = 256 * MEGABYTE
-
 NUM_RESULTS = 10
+
+# TODO: change inheritance scheme of the rankers. However, this should only be
+# done if I am sure that the classes will largely preserve the same behavior.
+#
+# - Can have single class Ranker
+# - Ranker.__init__ will set ranker._score = tfidf, bm25
+#
+#
+# TODO: use DAAT instead of TAAT
+#
 
 class TFIDF:
     def __init__(self, index_fpath: str):
@@ -61,8 +71,11 @@ class TFIDF:
 
         results = []
         for _ in range(NUM_RESULTS):
+            if len(scores) == 0:
+                break
+
             docid, score = scores.pop()
-            while True:
+            while len(scores) > 0:
                 new_docid, new_score = scores.pop()
                 if new_docid != docid:
                     # Put back
@@ -79,7 +92,7 @@ class TFIDF:
         result_json["Query"] = query
         result_json["Results"] = results
 
-        print(result_json)
+        print(json.dumps(result_json))
 
         logger.info(f"Successfully ranked query: '{query}'")
 
@@ -96,6 +109,7 @@ class TFIDF:
     def _tfidf(self, freq, len_postings):
         tf = freq
         idf = log2((self._num_docs + 1) / len_postings)
+        #logger.info(f"TFIDF for {freq}, {len_postings}: {tf}, {idf}")
         return tf * idf
 
 class BM25:
