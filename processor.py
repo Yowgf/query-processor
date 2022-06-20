@@ -47,6 +47,22 @@ def parse_args():
         type=str,
         help="logging level"
     )
+    parser.add_argument(
+        '-parallelism',
+        dest='parallelism',
+        action='store',
+        required=False,
+        type=str,
+        help="Maximum number of processes or threads to use"
+    )
+    parser.add_argument(
+        '-benchmarking',
+        dest='benchmarking',
+        action='store',
+        required=False,
+        type=bool,
+        help="Print only benchmarking (timing) information"
+    )
     args = parser.parse_args()
     return args
 

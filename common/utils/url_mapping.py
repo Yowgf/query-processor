@@ -1,3 +1,5 @@
+from typing import List
+
 BEGIN_URL_MAPPING = "-----BEGIN URL MAPPING-----\n"
 END_URL_MAPPING   = "-----END URL MAPPING-----\n"
 
@@ -10,6 +12,13 @@ class UrlMapping:
 
     def get_url(self, docid):
         return self._m[docid][1]
+
+    def filter_docids(self, docids: List[int]):
+        new_mapping = {}
+        for docid in docids:
+            new_mapping[docid] = self._m[docid]
+        del self._m
+        self._m = new_mapping
 
 def read_url_mapping(fpath, checkpoint):
     url_mapping = {}
@@ -33,3 +42,4 @@ def read_url_mapping(fpath, checkpoint):
         checkpoint = f.tell()
 
     return UrlMapping(url_mapping), checkpoint
+

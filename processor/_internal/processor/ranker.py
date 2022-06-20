@@ -1,13 +1,15 @@
 import concurrent.futures
-from datetime import datetime
+import gc
 import json
 from math import log as natural_log
 import os
 
 from common.log import log
 from common.memory.defs import MEGABYTE
+from common.memory.utils import sizeof
 from common.utils.index import (read_index,
-                                read_index_metadata)
+                                index_docids)
+from common.utils.index_metadata import read_index_metadata
 from common.utils.url_mapping import read_url_mapping
 from common.preprocessing.normalize import tokenize_and_normalize
 from .utils import subindex_with_words
@@ -21,9 +23,10 @@ RANKER_TYPE_TFIDF = "TFIDF"
 RANKER_TYPE_BM25  = "BM25"
 
 class Ranker:
-    def __init__(self, ranker_type: str, index_fpath: str):
+    def __init__(self, ranker_type: str, index_fpath: str, parallelism: int = None):
         self._index_fpath = index_fpath
         self._checkpoint = 0
+        self._max_num_process = parallelism or 4
 
         if ranker_type not in [RANKER_TYPE_TFIDF, RANKER_TYPE_BM25]:
             raise ValueError(f"Invalid ranker type {ranker_type}")
@@ -33,23 +36,15 @@ class Ranker:
         self._bm25_k1 = 1.5
         self._bm25_b = 0.75
 
-        self._max_num_process = 8
+        self._max_num_process = 4
 
     def init(self, queries):
         logger.info("Initializing ranker")
-
-        before = datetime.now()
 
         url_mapping, checkpoint = read_url_mapping(self._index_fpath, 0)
 
         index_metadata, checkpoint = read_index_metadata(self._index_fpath,
                                                          checkpoint)
-
-        self._url_mapping = url_mapping
-        self._num_docs = index_metadata.num_docs
-        self._max_docid = index_metadata.max_docid
-        self._avg_doc_len = index_metadata.avg_doc_len
-        self._checkpoint = checkpoint
 
         self._tokens = {}
         self._all_tokens = []
@@ -59,9 +54,20 @@ class Ranker:
             self._all_tokens.extend(tokenized_query)
         self._subindex = subindex_with_words(self._index_fpath, self._checkpoint,
                                              self._all_tokens)
+        self._url_mapping = url_mapping
+        self._num_docs = index_metadata.num_docs
+        self._max_docid = index_metadata.max_docid
+        self._avg_doc_len = index_metadata.avg_doc_len
+        self._checkpoint = checkpoint
 
-        elapsed = datetime.now() - before
-        logger.info(f"Time spent initializing (seconds): {elapsed.total_seconds()}")
+        #logger.info(f"Size of subindex: {sizeof(self._subindex)}.")
+        #logger.info(f"Size of url_mapping: {sizeof(self._url_mapping._m)}")
+
+        # URL mapping takes a lot of memory. We want to filter it to contain
+        # only documents relevant to the queries.
+        all_docids = index_docids(self._subindex)
+        self._url_mapping.filter_docids(all_docids)
+        logger.info(f"Size of url_mapping: {sizeof(self._url_mapping._m)}")
 
         logger.info("Successfully initialized ranker")
 
@@ -73,7 +79,7 @@ class Ranker:
     def rank(self):
         logger.info(f"Ranking queries: {list(self._tokens.keys())}")
 
-        before = datetime.now()
+        gc.collect()
 
         results = []
         with concurrent.futures.ProcessPoolExecutor(
@@ -83,15 +89,13 @@ class Ranker:
             for query in self._tokens:
                 futures.append(executor.submit(self._rank, query,
                                                self._tokens[query]))
-            completed, _ = concurrent.futures.wait(
+            completed, not_completed = concurrent.futures.wait(
                 futures,
                 return_when=concurrent.futures.ALL_COMPLETED,
             )
+            assert len(not_completed) == 0
             for future in completed:
                 results.append(future.result())
-
-        elapsed = datetime.now() - before
-        logger.info(f"Time spent ranking (seconds): {elapsed.total_seconds()}")
 
         logger.info(f"Successfully ranked queries: {list(self._tokens.keys())}")
 

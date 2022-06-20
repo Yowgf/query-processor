@@ -22,6 +22,8 @@ def find_word_postings(index_fpath, checkpoint, word):
             freq = int(split_by_comma[1])
             postings.append((docid, freq))
 
+        logger.debug(f"Length of posting for word '{word}': {len(postings)}")
+
         checkpoint = f.tell()
 
     return postings, checkpoint
