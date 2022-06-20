@@ -57,7 +57,7 @@ class Ranker:
                                              self._all_tokens)
 
         elapsed = datetime.now() - before
-        logger.info(f"Time spent initializing (seconds): {elapsed.seconds}")
+        logger.info(f"Time spent initializing (seconds): {elapsed.total_seconds()}")
 
         logger.info("Successfully initialized ranker")
 
@@ -80,7 +80,7 @@ class Ranker:
             logger.info(f"Successfully ranked query: '{query}'")
 
         elapsed = datetime.now() - before
-        logger.info(f"Time spent ranking (seconds): {elapsed.seconds}")
+        logger.info(f"Time spent ranking (seconds): {elapsed.total_seconds()}")
 
         logger.info(f"Successfully ranked queries: {list(self._tokens.keys())}")
 
@@ -97,7 +97,7 @@ class Ranker:
         posting_idxs = {word: 0 for word in subindex}
         for target_docid in range(self._max_docid):
             if target_docid % 10000 == 0:
-                logger.info(f"Scoring document with ID {target_docid}")
+                logger.debug(f"Scoring document with ID {target_docid}")
 
             score = 0
             for term in tokens:
