@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 from math import log as natural_log
 
@@ -33,6 +34,8 @@ class Ranker:
     def init(self, queries):
         logger.info("Initializing ranker")
 
+        before = datetime.now()
+
         url_mapping, checkpoint = read_url_mapping(self._index_fpath, 0)
 
         index_metadata, checkpoint = read_index_metadata(self._index_fpath,
@@ -53,11 +56,16 @@ class Ranker:
         self._subindex = subindex_with_words(self._index_fpath, self._checkpoint,
                                              self._all_tokens)
 
+        elapsed = datetime.now() - before
+        logger.info(f"Time spent initializing (seconds): {elapsed.seconds}")
+
         logger.info("Successfully initialized ranker")
 
     # rank uses internally stored queries, initialized in the init() function.
     def rank(self):
         logger.info(f"Ranking queries: {list(self._tokens.keys())}")
+
+        before = datetime.now()
 
         results = []
         for query in self._tokens:
@@ -70,6 +78,9 @@ class Ranker:
             results.append(json.dumps(result_json, ensure_ascii=False))
 
             logger.info(f"Successfully ranked query: '{query}'")
+
+        elapsed = datetime.now() - before
+        logger.info(f"Time spent ranking (seconds): {elapsed.seconds}")
 
         logger.info(f"Successfully ranked queries: {list(self._tokens.keys())}")
 
