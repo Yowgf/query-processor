@@ -34,14 +34,36 @@ def subindex_with_words(index_fpath, checkpoint, words):
     subindex = {}
     words_not_found = []
 
-    for word in sorted(words):
-        if word in subindex:
-            continue
+    words_set = set(words)
+    parsed_whole_file = False
+    with open(index_fpath, "r") as f:
+        while True:
+            while True:
+                newline = f.readline()
+                if newline == '':
+                    parsed_whole_file = True
+                    break
 
-        postings, checkpoint = find_word_postings(index_fpath, checkpoint, word)
-        if len(postings) == 0:
+                entries = newline.rstrip().split(" ")
+                word = entries[0]
+                if word in words_set:
+                    break
+            if parsed_whole_file:
+                break
+
+            postings = []
+            for entry in entries[1:]:
+                split_by_comma = entry.split(",")
+                docid = int(split_by_comma[0])
+                freq = int(split_by_comma[1])
+                postings.append((docid, freq))
+            subindex[word] = postings
+
+            logger.debug(f"Length of posting for word '{word}': {len(postings)}")
+
+    for word in words_set:
+        if word not in subindex:
             words_not_found.append(word)
-        subindex[word] = postings
 
     if len(words_not_found) > 0:
         logger.warning(f"The following words were not found in the index: "+

@@ -52,9 +52,6 @@ class Indexer:
         self._subindexes_dir = "subindexes"
         self._urlmapping_dir = "urlmapping"
 
-        # Dict filepath -> URL where we left off
-        self._file_checkpoint = {}
-
         self._num_docs = 0
         self._max_docid = 0
         self._sum_doc_lens = 0
@@ -525,7 +522,7 @@ class Indexer:
                         #  "b": [(3,4)]
                         # }
                         #
-                        # Notice that b >= b >= a, so last_index1 == 0
+                        # Notice that b >= b >= a, so last_index1 == 1
                         #
                         index1, checkpoint1 = read_index(
                             index1_fpath, checkpoint1, self._max_read_chars_subindex)

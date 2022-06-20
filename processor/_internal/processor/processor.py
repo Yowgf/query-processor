@@ -13,7 +13,8 @@ class Processor:
         self._benchmarking = config.benchmarking
         self._ranker = Ranker(config.ranker, self._index_file, self._parallelism)
 
-        self._total_time_spent = 0.0
+        self._time_init = None
+        self._time_run = None
 
     def init(self):
         logger.info(f"Initializing query processor")
@@ -23,8 +24,8 @@ class Processor:
         self._queries = open(self._queries_file, "r").read().strip().split("\n")
         self._ranker.init(self._queries)
 
-        self._total_time_spent += (datetime.now() - before).total_seconds()
-        logger.info("Total time spent after initializing: {self._total_time_spent}")
+        self._time_init = (datetime.now() - before).total_seconds()
+        logger.info(f"Total time spent initializing: {self._time_init}")
 
         logger.info(f"Successfully initialized query processor")
 
@@ -35,11 +36,13 @@ class Processor:
 
         results_json = self._ranker.rank()
 
-        self._total_time_spent += (datetime.now() - before).total_seconds()
-        logger.info("Total time spent after ranking: {self._total_time_spent}")
+        self._time_run = (datetime.now() - before).total_seconds()
+        logger.info(f"Total time spent after ranking: {self._time_run}")
 
         if self._benchmarking:
-            print(f"{self._total_time_spent:.6f}")
+            # Only print the run time, because in the benchmark we are focused
+            # in the speedup gains by parallelizing.
+            print(f"{self._time_run:.6f}")
         else:
             for result in results_json:
                 print(result)

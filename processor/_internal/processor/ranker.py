@@ -126,6 +126,17 @@ class Ranker:
         logger.info(f"Scoring tokens {tokens} with subindex of length: "+
                     f"{len(subindex)}")
 
+        to_delete = []
+        for i in range(len(tokens)):
+            if tokens[i] not in subindex:
+                to_delete.append(i)
+        for _ in range(len(to_delete)):
+            i = to_delete.pop()
+            tokens.pop(i)
+        if len(tokens) == 0:
+            logger.info(f"Did not find any of the tokens. Returning empmty score.")
+            return ScoreHeap()
+
         # DAAT adapted from 2022-01 Information Retrieval class slides
         #
         scores = ScoreHeap()
