@@ -1,6 +1,8 @@
+import concurrent.futures
 from datetime import datetime
 import json
 from math import log as natural_log
+import os
 
 from common.log import log
 from common.memory.defs import MEGABYTE
@@ -30,6 +32,8 @@ class Ranker:
         # k1 in [1.2, 2.0]
         self._bm25_k1 = 1.5
         self._bm25_b = 0.75
+
+        self._max_num_process = 8
 
     def init(self, queries):
         logger.info("Initializing ranker")
@@ -62,22 +66,29 @@ class Ranker:
         logger.info("Successfully initialized ranker")
 
     # rank uses internally stored queries, initialized in the init() function.
+    #
+    # This function is run by the master thread, which initializes one thread
+    # per query (of course with a maximum number of threads), and waits in a
+    # join.
     def rank(self):
         logger.info(f"Ranking queries: {list(self._tokens.keys())}")
 
         before = datetime.now()
 
         results = []
-        for query in self._tokens:
-            logger.info(f"Ranking query: '{query}'")
-
-            scores = self._score(self._subindex, self._tokens[query])
-
-            result_json = self._top10_json(query, scores)
-
-            results.append(json.dumps(result_json, ensure_ascii=False))
-
-            logger.info(f"Successfully ranked query: '{query}'")
+        with concurrent.futures.ProcessPoolExecutor(
+                max_workers=self._max_num_process
+        ) as executor:
+            futures = []
+            for query in self._tokens:
+                futures.append(executor.submit(self._rank, query,
+                                               self._tokens[query]))
+            completed, _ = concurrent.futures.wait(
+                futures,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+            for future in completed:
+                results.append(future.result())
 
         elapsed = datetime.now() - before
         logger.info(f"Time spent ranking (seconds): {elapsed.total_seconds()}")
@@ -85,6 +96,26 @@ class Ranker:
         logger.info(f"Successfully ranked queries: {list(self._tokens.keys())}")
 
         return results
+
+    # _rank is executed by each slave thread.
+    def _rank(self, query, tokens):
+        pid = os.getpid()
+
+        logger.info(f"({pid}) Ranking query: '{query}'")
+
+        try:
+            scores = self._score(self._subindex, self._tokens[query])
+            result = self._top10_json(query, scores)
+            result_json = json.dumps(result, ensure_ascii=False)
+
+        except Exception as e:
+            logger.error(f"({pid}) Received unexpected exception: "+
+                         f"{e}. Returning immediately.", exc_info=True)
+
+        logger.info(f"({pid}) Successfully ranked query: '{query}'. "+
+                    f"Result length: {len(result)}")
+
+        return result_json
 
     # Scores documents in a Document at a time (DAAT) fashion.
     def _score(self, subindex, tokens):
@@ -125,7 +156,7 @@ class Ranker:
                 scores.push(docid, score)
 
         logger.info(f"Successfully scored {tokens} with subindex len "+
-                    "{len(subindex)}. Scores length: {len(scores)}")
+                    f"{len(subindex)}. Scores length: {len(scores)}")
 
         return scores
 
