@@ -33,6 +33,9 @@ def subindex_with_words(index_fpath, checkpoint, words):
     words_not_found = []
 
     for word in sorted(words):
+        if word in subindex:
+            continue
+
         postings, checkpoint = find_word_postings(index_fpath, checkpoint, word)
         if len(postings) == 0:
             words_not_found.append(word)

@@ -12,22 +12,8 @@ from .score_heap import ScoreHeap
 
 logger = log.logger()
 
-MAX_READ_CHARS = 256 * MEGABYTE
-NUM_RESULTS = 10
-
-# TODO: change inheritance scheme of the rankers. However, this should only be
-# done if I am sure that the classes will largely preserve the same behavior.
-#
-# - Can have single class Ranker
-# - Ranker.__init__ will set ranker._score = tfidf, bm25
-#
-#
-
-# Necessary TODOs:
-#
-# 1- use DAAT instead of TAAT
-#
-
+MAX_READ_CHARS    = 256 * MEGABYTE
+NUM_RESULTS       = 10
 RANKER_TYPE_TFIDF = "TFIDF"
 RANKER_TYPE_BM25  = "BM25"
 
@@ -43,9 +29,8 @@ class Ranker:
         # k1 in [1.2, 2.0]
         self._bm25_k1 = 1.5
         self._bm25_b = 0.75
-        
 
-    def init(self):
+    def init(self, queries):
         logger.info("Initializing ranker")
 
         url_mapping, checkpoint = read_url_mapping(self._index_fpath, 0)
@@ -59,41 +44,36 @@ class Ranker:
         self._avg_doc_len = index_metadata.avg_doc_len
         self._checkpoint = checkpoint
 
+        self._tokens = {}
+        self._all_tokens = []
+        for query in queries:
+            tokenized_query = tokenize_and_normalize(query)
+            self._tokens[query] = tokenized_query
+            self._all_tokens.extend(tokenized_query)
+        self._subindex = subindex_with_words(self._index_fpath, self._checkpoint,
+                                             self._all_tokens)
+
         logger.info("Successfully initialized ranker")
 
-    def rank(self, query: str):
-        logger.info(f"Ranking query: '{query}'")
-
-        tokens = tokenize_and_normalize(query)
-        subindex = subindex_with_words(self._index_fpath, self._checkpoint, tokens)
-        scores = self._score(subindex, tokens)
+    # rank uses internally stored queries, initialized in the init() function.
+    def rank(self):
+        logger.info(f"Ranking queries: {list(self._tokens.keys())}")
 
         results = []
-        for _ in range(NUM_RESULTS):
-            if len(scores) == 0:
-                break
+        for query in self._tokens:
+            logger.info(f"Ranking query: '{query}'")
 
-            docid, score = scores.pop()
-            while len(scores) > 0:
-                new_docid, new_score = scores.pop()
-                if new_docid != docid:
-                    # Put back
-                    scores.push(new_docid, new_score)
-                    break
-                score += new_score
+            scores = self._score(self._subindex, self._tokens[query])
 
-            results.append({
-                "URL": self._url_mapping.get_url(docid),
-                "Score": round(score, 1),
-            })
+            result_json = self._top10_json(query, scores)
 
-        result_json = {}
-        result_json["Query"] = query
-        result_json["Results"] = results
+            results.append(json.dumps(result_json, ensure_ascii=False))
 
-        logger.info(f"Successfully ranked query: '{query}'")
+            logger.info(f"Successfully ranked query: '{query}'")
 
-        return json.dumps(result_json, ensure_ascii=False)
+        logger.info(f"Successfully ranked queries: {list(self._tokens.keys())}")
+
+        return results
 
     # Scores documents in a Document at a time (DAAT) fashion.
     def _score(self, subindex, tokens):
@@ -155,3 +135,29 @@ class Ranker:
                                     self._url_mapping.get_doc_len(docid) /
                                     self._avg_doc_len)
         )
+
+    def _top10_json(self, query: str, scores: ScoreHeap):
+        results = []
+        for _ in range(NUM_RESULTS):
+            if len(scores) == 0:
+                break
+
+            docid, score = scores.pop()
+            while len(scores) > 0:
+                new_docid, new_score = scores.pop()
+                if new_docid != docid:
+                    # Put back
+                    scores.push(new_docid, new_score)
+                    break
+                score += new_score
+
+            results.append({
+                "URL": self._url_mapping.get_url(docid),
+                "Score": round(score, 1),
+            })
+
+        result_json = {}
+        result_json["Query"] = query
+        result_json["Results"] = results
+
+        return result_json
