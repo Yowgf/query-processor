@@ -52,7 +52,7 @@ def parse_args():
         dest='parallelism',
         action='store',
         required=False,
-        type=str,
+        type=int,
         help="Maximum number of processes or threads to use"
     )
     parser.add_argument(

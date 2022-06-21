@@ -2,7 +2,7 @@ import concurrent.futures
 import gc
 import json
 from math import log as natural_log
-import os
+import threading
 
 from common.log import log
 from common.memory.defs import MEGABYTE
@@ -12,7 +12,9 @@ from common.utils.index import (read_index,
 from common.utils.index_metadata import read_index_metadata
 from common.utils.url_mapping import read_url_mapping
 from common.preprocessing.normalize import tokenize_and_normalize
-from .utils import subindex_with_words
+from .utils import (preprocess_entire_index,
+                    find_checkpoints_marks,
+                    subindex_from_words_marks)
 from .score_heap import ScoreHeap
 
 logger = log.logger()
@@ -23,10 +25,12 @@ RANKER_TYPE_TFIDF = "TFIDF"
 RANKER_TYPE_BM25  = "BM25"
 
 class Ranker:
-    def __init__(self, ranker_type: str, index_fpath: str, parallelism: int = None):
+    def __init__(self, ranker_type: str, index_fpath: str, parallelism: int = None,
+                 benchmarking: bool = None):
         self._index_fpath = index_fpath
         self._checkpoint = 0
         self._max_num_thread = parallelism or 4
+        self._benchmarking = benchmarking
 
         if ranker_type not in [RANKER_TYPE_TFIDF, RANKER_TYPE_BM25]:
             raise ValueError(f"Invalid ranker type {ranker_type}")
@@ -47,27 +51,44 @@ class Ranker:
                                                          checkpoint)
 
         self._tokens = {}
-        self._all_tokens = []
+        all_tokens = []
         for query in queries:
             tokenized_query = tokenize_and_normalize(query)
             self._tokens[query] = tokenized_query
-            self._all_tokens.extend(tokenized_query)
-        self._subindex = subindex_with_words(self._index_fpath, self._checkpoint,
-                                             self._all_tokens)
+            for word in tokenized_query:
+                if word not in all_tokens:
+                    all_tokens.append(word)
         self._url_mapping = url_mapping
         self._num_docs = index_metadata.num_docs
         self._max_docid = index_metadata.max_docid
         self._avg_doc_len = index_metadata.avg_doc_len
-        self._checkpoint = checkpoint
 
         #logger.info(f"Size of subindex: {sizeof(self._subindex)}.")
         #logger.info(f"Size of url_mapping: {sizeof(self._url_mapping._m)}")
 
         # URL mapping takes a lot of memory. We want to filter it to contain
         # only documents relevant to the queries.
-        all_docids = index_docids(self._subindex)
-        self._url_mapping.filter_docids(all_docids)
+        #
+        # preprocess_entire_index also returns marks every MB of the file, for
+        # easy access by slave threads.
+        subindex, marks, words_not_found = preprocess_entire_index(
+            self._index_fpath, checkpoint, all_tokens)
+        all_docids = index_docids(subindex)
+        #self._url_mapping.filter_docids(all_docids)
         logger.info(f"Size of url_mapping: {sizeof(self._url_mapping._m)}")
+        del subindex, all_docids
+        self._marks = marks
+        self._words_not_found = set(words_not_found)
+        gc.collect()
+
+        # Delete tokens that are not found in the index. This preprocessing can
+        # reduce the number of loops traversed in the DAAT matching.
+        for query in self._tokens:
+            tokens = self._tokens[query]
+            for i in range(len(tokens)-1, -1, -1):
+                if tokens[i] in words_not_found:
+                    logger.info(f"Token '{tokens[i]}' not found in index")
+                    self._tokens[query].pop(i)
 
         logger.info("Successfully initialized ranker")
 
@@ -76,7 +97,7 @@ class Ranker:
     # This function is run by the master thread, which initializes one thread
     # per query (of course with a maximum number of threads), and waits in a
     # join.
-    def rank(self):
+    def rank_all(self):
         logger.info(f"Ranking queries: {list(self._tokens.keys())}")
 
         gc.collect()
@@ -103,20 +124,26 @@ class Ranker:
 
     # _rank is executed by each slave thread.
     def _rank(self, query, tokens):
-        pid = os.getpid()
-
-        logger.info(f"({pid}) Ranking query: '{query}'")
+        tid = threading.get_ident()
 
         try:
-            scores = self._score(self._subindex, self._tokens[query])
+            logger.info(f"({tid}) Ranking query: '{query}'. Tokens: "+
+                        f"{self._tokens[query]}")
+
+            tokens = self._tokens[query]
+            checkpoints = find_checkpoints_marks(self._marks, tokens, tid)
+            subindex = subindex_from_words_marks(self._index_fpath, checkpoints,
+                                                 tokens, tid)
+
+            scores = self._score(subindex, tokens)
             result = self._top10_json(query, scores)
             result_json = json.dumps(result, ensure_ascii=False)
 
         except Exception as e:
-            logger.error(f"({pid}) Received unexpected exception: "+
+            logger.error(f"({tid}) Received unexpected exception: "+
                          f"{e}. Returning immediately.", exc_info=True)
 
-        logger.info(f"({pid}) Successfully ranked query: '{query}'. "+
+        logger.info(f"({tid}) Successfully ranked query: '{query}'. "+
                     f"Result length: {len(result)}")
 
         return result_json
@@ -126,22 +153,15 @@ class Ranker:
         logger.info(f"Scoring tokens {tokens} with subindex of length: "+
                     f"{len(subindex)}")
 
-        # Delete tokens that are not found in the index. This preprocessing can
-        # reduce the number of loops traversed in the DAAT matching.
-        to_delete = []
-        for i in range(len(tokens)):
-            if tokens[i] not in subindex:
-                to_delete.append(i)
-        for _ in range(len(to_delete)):
-            i = to_delete.pop()
-            tokens.pop(i)
         if len(tokens) == 0:
-            logger.info(f"Did not find any of the tokens. Returning empmty score.")
+            logger.info(f"Did not find any of the tokens. Returning empty score.")
             return ScoreHeap()
 
         # DAAT adapted from 2022-01 Information Retrieval class slides
         #
         scores = ScoreHeap()
+        if self._benchmarking:
+            scores_list = []
         posting_idxs = {word: 0 for word in subindex}
         for target_docid in range(self._max_docid):
             if target_docid % 10000 == 0:
@@ -164,7 +184,6 @@ class Ranker:
                         elif self._ranker_type == RANKER_TYPE_BM25:
                             score += self._bm25(docid, weight, len(subindex[term]))
 
-                        scores.push(docid, score)
                         posting_idx += 1
                         break
                     posting_idx += 1
@@ -173,6 +192,10 @@ class Ranker:
 
             if score != 0:
                 scores.push(docid, score)
+                if self._benchmarking:
+                    scores_list.append(score)
+        if self._benchmarking:
+            print(json.dumps(scores_list))
 
         logger.info(f"Successfully scored {tokens} with subindex len "+
                     f"{len(subindex)}. Scores length: {len(scores)}")
@@ -204,13 +227,13 @@ class Ranker:
                 break
 
             docid, score = scores.pop()
-            while len(scores) > 0:
-                new_docid, new_score = scores.pop()
-                if new_docid != docid:
-                    # Put back
-                    scores.push(new_docid, new_score)
-                    break
-                score += new_score
+            # while len(scores) > 0:
+            #     new_docid, new_score = scores.pop()
+            #     if new_docid != docid:
+            #         # Put back
+            #         scores.push(new_docid, new_score)
+            #         break
+            #     score += new_score
 
             results.append({
                 "URL": self._url_mapping.get_url(docid),

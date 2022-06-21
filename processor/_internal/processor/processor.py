@@ -11,7 +11,8 @@ class Processor:
         self._queries_file = config.queries
         self._parallelism = config.parallelism
         self._benchmarking = config.benchmarking
-        self._ranker = Ranker(config.ranker, self._index_file, self._parallelism)
+        self._ranker = Ranker(config.ranker, self._index_file, self._parallelism,
+                              self._benchmarking)
 
         self._time_init = None
         self._time_run = None
@@ -34,17 +35,16 @@ class Processor:
 
         before = datetime.now()
 
-        results_json = self._ranker.rank()
+        results_json = self._ranker.rank_all()
 
         self._time_run = (datetime.now() - before).total_seconds()
-        logger.info(f"Total time spent after ranking: {self._time_run}")
+        logger.info(f"Total time spent ranking: {self._time_run}")
 
+        for result in results_json:
+            print(result)
         if self._benchmarking:
             # Only print the run time, because in the benchmark we are focused
             # in the speedup gains by parallelizing.
             print(f"{self._time_run:.6f}")
-        else:
-            for result in results_json:
-                print(result)
 
         logger.info("Successfully ran query processor")
