@@ -28,7 +28,6 @@ def skip_url_mapping(infpath, checkpoint):
         f.seek(checkpoint)
 
         first_line = f.readline()
-        print(first_line)
         assert first_line == BEGIN_URL_MAPPING, first_line
 
         line = None

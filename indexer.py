@@ -49,6 +49,15 @@ if __name__ == "__main__":
         help="logging level"
     )
     parser.add_argument(
+        '-extra-statistics',
+        dest='extra_statistics',
+        action='store',
+        required=False,
+        type=bool,
+        help=("Whether to include extra statistics in the statistics printed at "+
+              "the end of the execution.")
+    )
+    parser.add_argument(
         '-track-memory',
         dest='track_memory',
         action='store',

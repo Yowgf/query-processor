@@ -23,9 +23,9 @@ from .url_mapping import (write_url_mapping_begin,
                           write_url_mapping_end,
                           write_url_mapping,
                           skip_url_mapping)
-from common.utils.index import (NUM_DOCS_KEY,
-                                MAX_DOCID_KEY,
-                                AVG_DOC_LEN_KEY)
+from common.utils.index_metadata import (NUM_DOCS_KEY,
+                                         MAX_DOCID_KEY,
+                                         AVG_DOC_LEN_KEY)
 from common.log import log
 from common.memory.defs import (MEGABYTE,
                                 MAX_DOCS_PER_FILE)
@@ -46,6 +46,7 @@ class Indexer:
         self._corpus = config.corpus
         self._memory_limit = config.memory_limit
         self._output_file = config.output_file
+        self._extra_statistics = config.extra_statistics
 
         self._corpus_files = None
         self._index: Mapping[str, List[Tuple[int, int]]] = {}
@@ -53,6 +54,7 @@ class Indexer:
         self._urlmapping_dir = "urlmapping"
 
         self._num_docs = 0
+        self._num_tokens = 0
         self._max_docid = 0
         self._sum_doc_lens = 0
 
@@ -178,7 +180,7 @@ class Indexer:
 
         statistics = self._gather_statistics()
         statistics.set_elapsed_time(elapsed_secs)
-        print(statistics.to_json())
+        print(statistics.to_json(self._extra_statistics))
 
         self._cleanup()
 
@@ -187,9 +189,10 @@ class Indexer:
             results.append(executor.submit(self._run, subindex))
 
     def _process_complete_job(self, future):
-        subindex, completed_subindex, sum_doc_lens = future.result()
+        subindex, completed_subindex, sum_doc_lens, num_tokens = future.result()
 
         self._sum_doc_lens += sum_doc_lens
+        self._num_tokens += num_tokens
 
         if not completed_subindex:
             return subindex
@@ -212,7 +215,7 @@ class Indexer:
         index_size = int(os.stat(self._output_file).st_size / MEGABYTE)
 
         num_lists = 0
-        list_sizes = []
+        posting_lens = []
         avg_list_size = 0
 
         checkpoint = skip_url_mapping(self._output_file, 0)
@@ -222,21 +225,26 @@ class Indexer:
                 self._output_file, checkpoint, self._max_read_chars_subindex)
 
             for word in index:
-                list_sizes.append(len(index[word]))
+                posting_lens.append(len(index[word]))
                 num_lists += 1
 
             del index
             gc.collect()
 
-        if len(list_sizes) == 0:
+        if len(posting_lens) == 0:
             avg_list_size = 0
         else:
-            avg_list_size = round(sum(list_sizes) / len(list_sizes), 1)
+            avg_list_size = round(sum(posting_lens) / len(posting_lens), 1)
 
         statistics = Statistics()
         statistics.set_index_size(index_size)
         statistics.set_num_lists(num_lists)
         statistics.set_avg_list_size(avg_list_size)
+
+        # Extra
+        statistics.set_num_docs(self._num_docs)
+        statistics.set_num_tokens(self._num_tokens)
+        statistics.set_posting_lens(posting_lens)
 
         return statistics
 
@@ -256,7 +264,7 @@ class Indexer:
                 fpath, old_checkpoint, pid)
             for length in doc_lens.values():
                 sum_doc_lens += length
-            tokenized_docs = self._tokenize(docs, pid)
+            tokenized_docs, num_tokens = self._tokenize(docs, pid)
             del docs
             preprocessed_docs = self._preprocess(tokenized_docs, pid)
             del tokenized_docs
@@ -278,10 +286,10 @@ class Indexer:
                 # need to restore the previous state so that we can try again.
                 subindex.docid = old_docid
                 subindex.push_file(fpath, old_checkpoint)
-                return subindex, False, 0
+                return subindex, False, 0, 0
             except Exception as e:
                 logger.error(f"({pid}) Error pushing file to subindex: {e}.")
-                return subindex, False, 0
+                return subindex, False, 0, 0
 
         try:
             if not completed:
@@ -294,7 +302,7 @@ class Indexer:
             logger.info(f"({pid}) Completed subindex with id {subindex.id}")
             completed_subindex = True
 
-        return subindex, completed_subindex, sum_doc_lens
+        return subindex, completed_subindex, sum_doc_lens, num_tokens
 
     def _streamize(self, fpath: str, old_checkpoint: int, pid="Unknown"):
         logger.info(f"({pid}) Streamizing doc for path '{fpath}', "+
@@ -335,14 +343,16 @@ class Indexer:
         logger.info(f"({pid}) Tokenizing docs")
         log_memory_usage(logger)
 
+        num_tokens = 0
         for doc in docs:
             docs[doc] = tokenize(docs[doc])
+            num_tokens += len(docs[doc])
 
         logger.info(f"({pid}) Successfully tokenized docs")
         logger.debug(f"({pid}) Tokenized docs len: {len(docs)}")
         log_memory_usage(logger)
 
-        return docs
+        return docs, num_tokens
 
     def _preprocess(self, tokenized_docs, pid="Unknown") -> Mapping[str, Mapping[str, int]]:
         logger.info(f"({pid}) Preprocessing docs")
@@ -441,7 +451,10 @@ class Indexer:
 
         num_docs = self._num_docs
         max_docid = self._max_docid
-        avg_doc_len = self._sum_doc_lens / num_docs
+        if num_docs != 0:
+            avg_doc_len = self._sum_doc_lens / num_docs
+        else:
+            avg_doc_len = 0
 
         with open(self._output_file, "a") as f:
             f.write(f"{NUM_DOCS_KEY} {num_docs}\n")

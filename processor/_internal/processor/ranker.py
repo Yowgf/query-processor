@@ -26,7 +26,7 @@ class Ranker:
     def __init__(self, ranker_type: str, index_fpath: str, parallelism: int = None):
         self._index_fpath = index_fpath
         self._checkpoint = 0
-        self._max_num_process = parallelism or 4
+        self._max_num_thread = parallelism or 4
 
         if ranker_type not in [RANKER_TYPE_TFIDF, RANKER_TYPE_BM25]:
             raise ValueError(f"Invalid ranker type {ranker_type}")
@@ -36,7 +36,7 @@ class Ranker:
         self._bm25_k1 = 1.5
         self._bm25_b = 0.75
 
-        self._max_num_process = 4
+        self._max_num_thread = 4
 
     def init(self, queries):
         logger.info("Initializing ranker")
@@ -82,8 +82,8 @@ class Ranker:
         gc.collect()
 
         results = []
-        with concurrent.futures.ProcessPoolExecutor(
-                max_workers=self._max_num_process
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_num_thread
         ) as executor:
             futures = []
             for query in self._tokens:
@@ -126,6 +126,8 @@ class Ranker:
         logger.info(f"Scoring tokens {tokens} with subindex of length: "+
                     f"{len(subindex)}")
 
+        # Delete tokens that are not found in the index. This preprocessing can
+        # reduce the number of loops traversed in the DAAT matching.
         to_delete = []
         for i in range(len(tokens)):
             if tokens[i] not in subindex:
@@ -156,10 +158,12 @@ class Ranker:
                         # The inverted list is ordered by docid
                         break
                     elif docid == target_docid:
+                        # Scoring policy
                         if self._ranker_type == RANKER_TYPE_TFIDF:
                             score += self._tfidf(docid, weight, len(subindex[term]))
                         elif self._ranker_type == RANKER_TYPE_BM25:
                             score += self._bm25(docid, weight, len(subindex[term]))
+
                         scores.push(docid, score)
                         posting_idx += 1
                         break

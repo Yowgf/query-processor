@@ -1,5 +1,5 @@
 from common.log import log
-from common.utils.index import (BEGIN_INDEX_METADATA, END_INDEX_METADATA)
+from common.utils.index_metadata import (BEGIN_INDEX_METADATA, END_INDEX_METADATA)
 
 logger = log.logger()
 
