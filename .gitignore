@@ -8,6 +8,7 @@ venv
 *#
 
 # Project-specific
+data
 corpus*
 subindexes
 index.out
